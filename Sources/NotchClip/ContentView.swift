@@ -169,7 +169,7 @@ struct ContentView: View {
         HStack(spacing: 5) {
             filterButton("Все", icon: nil, value: 0)
             filterButton("Текст", icon: showIcons ? "text.alignleft" : nil, value: 1)
-            filterButton("Изображения", icon: showIcons ? "photo" : nil, value: 2)
+            filterButton(showIcons ? "Изображения" : "Фото", icon: showIcons ? "photo" : nil, value: 2)
             filterButton("Файлы", icon: showIcons ? "doc" : nil, value: 3)
             filterButton("Ссылки", icon: showIcons ? "link" : nil, value: 4)
         }
@@ -182,7 +182,7 @@ struct ContentView: View {
             }.font(.system(size: 12, weight: state.filter == value ? .semibold : .regular))
                 .padding(.horizontal, 8).frame(height: 27)
                 .background(state.filter == value ? Color.white.opacity(0.22) : Color.white.opacity(0.06), in: Capsule())
-        }.buttonStyle(.plain).accessibilityLabel(title).accessibilityAddTraits(state.filter == value ? .isSelected : [])
+        }.buttonStyle(.plain).accessibilityLabel(value == 2 ? "Изображения" : title).accessibilityAddTraits(state.filter == value ? .isSelected : [])
     }
 
     func sizePreset(_ title: String, width: Double, height: Double) -> some View {
