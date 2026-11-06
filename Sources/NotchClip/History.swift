@@ -1,12 +1,17 @@
 import Foundation
 
 struct Clip: Codable, Identifiable, Equatable {
-    enum Kind: String, Codable { case text, image }
+    enum Kind: String, Codable { case text, image, file }
     var id = UUID()
     var kind: Kind
     var data: Data
     var createdAt = Date()
     var isPinned = false
+    var linkURL: URL? {
+        guard kind == .text, let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let url = URL(string: text), let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme), url.host != nil else { return nil }
+        return url
+    }
 
     init(id: UUID = UUID(), kind: Kind, data: Data, createdAt: Date = Date(), isPinned: Bool = false) {
         self.id = id; self.kind = kind; self.data = data; self.createdAt = createdAt; self.isPinned = isPinned

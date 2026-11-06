@@ -27,6 +27,7 @@ final class ClipPanel: NSPanel {
     var mouseTimer: Timer?
     var wasInTrigger = false
     var behavior = PanelBehavior()
+    var isMenuTracking = false
     var hideWork: DispatchWorkItem?
     var openToken = UUID()
     @Published var collapsedWidth: CGFloat = 190
@@ -65,6 +66,8 @@ final class ClipPanel: NSPanel {
             return noErr
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &eventHandler)
         registerShortcut(); store.start()
+        NotificationCenter.default.addObserver(self, selector: #selector(menuDidOpen), name: NSMenu.didBeginTrackingNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(menuDidClose), name: NSMenu.didEndTrackingNotification, object: nil)
         let timer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in Task { @MainActor in self?.checkHover() } }
         RunLoop.main.add(timer, forMode: .common); mouseTimer = timer
     }
@@ -74,6 +77,8 @@ final class ClipPanel: NSPanel {
         let result = RegisterEventHotKey(keys[max(0, min(shortcut, keys.count - 1))], UInt32(cmdKey | shiftKey), EventHotKeyID(signature: 0x4E434C50, id: 1), GetApplicationEventTarget(), 0, &hotKey)
         if result != noErr { store.errorMessage = "Не удалось включить горячую клавишу. Попробуй другую в настройках." }
     }
+    @objc func menuDidOpen(_ note: Notification) { isMenuTracking = true }
+    @objc func menuDidClose(_ note: Notification) { isMenuTracking = false }
     func checkHover() {
         let point = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) }) else { return }
@@ -91,7 +96,7 @@ final class ClipPanel: NSPanel {
             if action == .open { show(on: screen, held: false) }
         } else { behavior.pointerLeftTrigger() }
         wasInTrigger = insideTrigger
-        if expanded && behavior.pointerMoved(inside: insideTrigger || panel.frame.contains(point), editing: editing, at: now, delay: hoverCloseDelay) == .close {
+        if expanded && behavior.pointerMoved(inside: insideTrigger || panel.frame.contains(point), editing: editing || isMenuTracking, at: now, delay: hoverCloseDelay) == .close {
             close()
         }
     }
@@ -138,8 +143,9 @@ final class ClipPanel: NSPanel {
         let delay = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : animationDuration + 0.25
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
-    func select(_ clip: Clip) { store.select(clip); close() }
+    func select(_ clip: Clip) { if store.select(clip) { close() } }
     func applicationWillTerminate(_ notification: Notification) {
+        NotificationCenter.default.removeObserver(self)
         if let hotKey { UnregisterEventHotKey(hotKey) }
         if let eventHandler { RemoveEventHandler(eventHandler) }
     }
