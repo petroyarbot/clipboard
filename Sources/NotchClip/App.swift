@@ -26,10 +26,8 @@ final class ClipPanel: NSPanel {
     var eventHandler: EventHandlerRef?
     var mouseTimer: Timer?
     var wasInTrigger = false
-    var heldOpen = false
-    var closeWork: DispatchWorkItem?
+    var behavior = PanelBehavior()
     var hideWork: DispatchWorkItem?
-    var openWork: DispatchWorkItem?
     var openToken = UUID()
     @Published var collapsedWidth: CGFloat = 190
     @Published var collapsedHeight: CGFloat = 28
@@ -37,10 +35,10 @@ final class ClipPanel: NSPanel {
     @AppStorage("shortcut") var shortcut = 0
     @AppStorage("panelWidth") var panelWidth = 620.0
     @AppStorage("panelHeight") var panelHeight = 500.0
-    @AppStorage("animationDuration") var animationDuration = 0.45
+    @AppStorage("animationDuration") var animationDuration = 0.30
     @AppStorage("animationBounce") var animationBounce = 0.12
-    @AppStorage("hoverOpenDelay") var hoverOpenDelay = 0.12
-    @AppStorage("hoverCloseDelay") var hoverCloseDelay = 0.45
+    @AppStorage("hoverOpenDelay") var hoverOpenDelay = 0.0
+    @AppStorage("hoverCloseDelay") var hoverCloseDelay = 0.30
     var size: NSSize { NSSize(width: panelWidth, height: panelHeight) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -67,7 +65,7 @@ final class ClipPanel: NSPanel {
             return noErr
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &eventHandler)
         registerShortcut(); store.start()
-        let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in Task { @MainActor in self?.checkHover() } }
+        let timer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in Task { @MainActor in self?.checkHover() } }
         RunLoop.main.add(timer, forMode: .common); mouseTimer = timer
     }
     func registerShortcut() {
@@ -85,33 +83,27 @@ final class ClipPanel: NSPanel {
             notchWidth = max(180, frame.width - left.width - right.width)
         } else { notchWidth = 200 }
         let insideTrigger = abs(point.x - frame.midX) < notchWidth / 2 && point.y >= frame.maxY - max(screen.safeAreaInsets.top, 8)
-        if hoverEnabled && insideTrigger && !wasInTrigger && !expanded {
-            let work = DispatchWorkItem { [weak self, weak screen] in
-                guard let self, let screen else { return }
-                self.openWork = nil
-                self.show(on: screen, held: false)
-            }
-            openWork?.cancel(); openWork = work
-            DispatchQueue.main.asyncAfter(deadline: .now() + hoverOpenDelay, execute: work)
-        }
-        if !insideTrigger { openWork?.cancel(); openWork = nil }
+        let now = ProcessInfo.processInfo.systemUptime
+        if hoverEnabled && insideTrigger {
+            let action = wasInTrigger
+                ? behavior.pointerStayedInTrigger(at: now, delay: hoverOpenDelay)
+                : behavior.pointerEnteredTrigger(at: now, delay: hoverOpenDelay)
+            if action == .open { show(on: screen, held: false) }
+        } else { behavior.pointerLeftTrigger() }
         wasInTrigger = insideTrigger
-        guard expanded, !heldOpen, !editing else { closeWork?.cancel(); closeWork = nil; return }
-        if insideTrigger || panel.frame.contains(point) { closeWork?.cancel(); closeWork = nil }
-        else if closeWork == nil {
-            let work = DispatchWorkItem { [weak self] in self?.close() }
-            closeWork = work; DispatchQueue.main.asyncAfter(deadline: .now() + hoverCloseDelay, execute: work)
+        if expanded && behavior.pointerMoved(inside: insideTrigger || panel.frame.contains(point), editing: editing, at: now, delay: hoverCloseDelay) == .close {
+            close()
         }
     }
+
     @objc func toggle() {
         if expanded { close() }
         else { show(on: NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main, held: true) }
     }
     func show(on screen: NSScreen?, held: Bool) {
         guard let screen else { return }
-        openWork?.cancel(); openWork = nil
-        closeWork?.cancel(); closeWork = nil; hideWork?.cancel()
-        heldOpen = held
+        hideWork?.cancel()
+        behavior.didOpen(held: held)
         if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
             collapsedWidth = max(100, screen.frame.width - left.width - right.width)
             collapsedHeight = max(20, screen.safeAreaInsets.top)
@@ -122,7 +114,7 @@ final class ClipPanel: NSPanel {
         panel.makeKeyAndOrderFront(nil)
         let token = UUID(); openToken = token
         // Give AppKit one frame to present the collapsed shape before expanding it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { [weak self] in
             guard let self, self.openToken == token else { return }
             withAnimation(self.animation) { self.expanded = true }
         }
@@ -139,8 +131,7 @@ final class ClipPanel: NSPanel {
         NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .spring(response: animationDuration, dampingFraction: 1 - animationBounce)
     }
     func close() {
-        openToken = UUID(); openWork?.cancel(); openWork = nil
-        closeWork?.cancel(); closeWork = nil; heldOpen = false; editing = false
+        openToken = UUID(); behavior.didClose(); editing = false
         withAnimation(animation) { expanded = false }
         let work = DispatchWorkItem { [weak self] in self?.panel.orderOut(nil) }
         hideWork?.cancel(); hideWork = work

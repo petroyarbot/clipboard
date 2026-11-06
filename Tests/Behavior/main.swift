@@ -1,0 +1,32 @@
+import Foundation
+
+func check(_ value: @autoclosure () -> Bool, _ message: String) {
+    if !value() { fputs("FAIL: \(message)\n", stderr); exit(1) }
+}
+var panel = PanelBehavior()
+check(panel.pointerEnteredTrigger(at: 0, delay: 0) == .open, "zero-delay hover opens immediately")
+panel.didOpen(held: false)
+check(panel.pointerMoved(inside: false, editing: false, at: 1, delay: 0.3) == .none, "leaving begins grace period")
+check(panel.pointerMoved(inside: false, editing: false, at: 1.31, delay: 0.3) == .close, "settings do not prevent closing")
+panel.didOpen(held: false)
+check(panel.pointerMoved(inside: false, editing: true, at: 3, delay: 0.3) == .none, "editing prevents closing")
+check(panel.pointerMoved(inside: false, editing: true, at: 5, delay: 0.3) == .none, "editing continues to protect draft")
+panel.didOpen(held: true)
+check(panel.pointerMoved(inside: false, editing: false, at: 8, delay: 0.3) == .none, "keyboard opening remains visible before entry")
+check(panel.pointerMoved(inside: true, editing: false, at: 9, delay: 0.3) == .none, "entering keyboard-opened panel is safe")
+check(panel.pointerMoved(inside: false, editing: false, at: 10, delay: 0.3) == .none, "leaving keyboard-opened panel begins grace period")
+check(panel.pointerMoved(inside: false, editing: false, at: 10.31, delay: 0.3) == .close, "keyboard-opened panel closes after entry and exit")
+panel.didClose()
+check(panel.pointerEnteredTrigger(at: 20, delay: 0.1) == .none, "hover delay respected")
+check(panel.pointerStayedInTrigger(at: 20.11, delay: 0.1) == .open, "hover opens after delay")
+panel.didClose()
+check(panel.pointerEnteredTrigger(at: 30, delay: 0.3) == .none, "opening is delayed")
+panel.pointerLeftTrigger()
+check(panel.pointerStayedInTrigger(at: 31, delay: 0.3) == .none, "leaving trigger cancels opening")
+panel.didOpen(held: false)
+check(panel.pointerMoved(inside: false, editing: false, at: 40, delay: 0.3) == .none, "start grace period")
+check(panel.pointerMoved(inside: true, editing: false, at: 40.2, delay: 0.3) == .none, "re-entry cancels closing")
+check(panel.pointerMoved(inside: false, editing: false, at: 40.4, delay: 0.3) == .none, "new exit restarts delay")
+check(panel.pointerMoved(inside: false, editing: false, at: 40.71, delay: 0.3) == .close, "new exit eventually closes")
+panel.didClose()
+print("PASS: hover timing, settings, editing and keyboard behavior")

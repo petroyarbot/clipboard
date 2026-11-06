@@ -17,11 +17,12 @@ struct ContentView: View {
     @AppStorage("shortcut") var shortcut = 0
     @AppStorage("panelWidth") var panelWidth = 620.0
     @AppStorage("panelHeight") var panelHeight = 500.0
-    @AppStorage("animationDuration") var animationDuration = 0.45
+    @AppStorage("animationDuration") var animationDuration = 0.30
     @AppStorage("animationBounce") var animationBounce = 0.12
-    @AppStorage("hoverOpenDelay") var hoverOpenDelay = 0.12
-    @AppStorage("hoverCloseDelay") var hoverCloseDelay = 0.45
+    @AppStorage("hoverOpenDelay") var hoverOpenDelay = 0.0
+    @AppStorage("hoverCloseDelay") var hoverCloseDelay = 0.30
     @StateObject private var state = ViewState()
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var filtered: [Clip] {
         store.history.ordered.filter { clip in
@@ -51,11 +52,12 @@ struct ContentView: View {
     }
     var content: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("NotchClip").font(.headline)
+            HStack(spacing: 10) {
+                Image(systemName: "clipboard").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white.opacity(0.8))
+                Text("Буфер обмена").font(.system(size: 16, weight: .semibold))
                 Spacer()
-                Button { state.showingSettings.toggle(); delegate.editing = state.showingSettings } label: { Image(systemName: "gearshape") }.buttonStyle(.plain).help("Настройки")
-                Button { delegate.close() } label: { Image(systemName: "xmark") }.buttonStyle(.plain).help("Закрыть")
+                Button { state.showingSettings.toggle() } label: { Image(systemName: state.showingSettings ? "gearshape.fill" : "gearshape").frame(width: 30, height: 30).contentShape(Rectangle()) }.buttonStyle(.plain).accessibilityLabel("Настройки").help("Настройки")
+                Button { delegate.close() } label: { Image(systemName: "xmark").frame(width: 30, height: 30).contentShape(Rectangle()) }.buttonStyle(.plain).accessibilityLabel("Закрыть").help("Закрыть")
             }
             if let error = store.errorMessage {
                 Text(error).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
@@ -85,10 +87,11 @@ struct ContentView: View {
                 }.frame(maxHeight: 240).background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
             }
 
-            HStack {
+            HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Поиск в истории", text: $state.query).textFieldStyle(.plain)
-            }.padding(9).background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 10))
+                    .font(.system(size: 14))
+            }.padding(.horizontal, 12).padding(.vertical, 10).modifier(GlassSurface(reduceTransparency: reduceTransparency))
             Picker("Фильтр", selection: $state.filter) {
                 Text("Все").tag(0); Text("Текст").tag(1); Text("Изображения").tag(2)
             }.pickerStyle(.segmented)
@@ -111,11 +114,11 @@ struct ContentView: View {
             Slider(value: value, in: range, step: step)
             Text(unit == "пт" ? "\(Int(value.wrappedValue)) \(unit)" : String(format: "%.2f %@", value.wrappedValue, unit))
                 .monospacedDigit().frame(width: 65, alignment: .trailing)
-        }.font(.caption)
+        }.font(.system(size: 13))
     }
     func section(_ title: String, items: [Clip]) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.caption).foregroundStyle(.secondary).padding(.top, 4)
+            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).padding(.top, 4)
             ForEach(items) { clip in row(clip) }
         }
     }
@@ -144,9 +147,10 @@ struct ContentView: View {
                 }
                 Button { store.remove(clip.id) } label: { Image(systemName: "trash") }.buttonStyle(.plain).foregroundStyle(.secondary).help("Удалить")
             }
-        }.padding(.horizontal, 10).padding(.vertical, 3).background(.white.opacity(clip.isPinned ? 0.10 : 0.04), in: RoundedRectangle(cornerRadius: 8))
+        }.font(.system(size: 14)).padding(.horizontal, 12).padding(.vertical, 5)
+            .background(.white.opacity(clip.isPinned ? 0.11 : 0.055), in: RoundedRectangle(cornerRadius: 10))
     }
-    func finishEditing() { state.editingID = nil; delegate.editing = state.showingSettings }
+    func finishEditing() { state.editingID = nil; delegate.editing = false }
 }
 
 // The top edge stays attached to the screen while the lower corners expand.
@@ -165,5 +169,27 @@ struct NotchShape: Shape {
         path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY), control: CGPoint(x: rect.maxX - top, y: rect.minY))
         path.closeSubpath()
         return path
+    }
+}
+
+struct GlassSurface: ViewModifier {
+    var reduceTransparency: Bool
+    @ViewBuilder func body(content: Content) -> some View {
+        if reduceTransparency {
+            content.background(Color(white: 0.20), in: RoundedRectangle(cornerRadius: 11))
+        } else {
+            glass(content)
+        }
+    }
+    @ViewBuilder private func glass(_ content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: .rect(cornerRadius: 11))
+        } else {
+            content.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 11))
+        }
+        #else
+        content.background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 11))
+        #endif
     }
 }
