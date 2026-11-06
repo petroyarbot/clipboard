@@ -6,6 +6,7 @@ final class ViewState: ObservableObject {
     @Published var query = ""
     @Published var showingSettings = false
     @Published var confirmClear = false
+    @Published var confirmHistoryClear = false
     @Published var filter = 0
     @Published var editingID: UUID?
     @Published var editText = ""
@@ -93,10 +94,24 @@ struct ContentView: View {
             } else if let id = state.previewID, let clip = store.history.clips.first(where: { $0.id == id }) {
                 preview(clip)
             } else {
-                ViewThatFits(in: .horizontal) {
-                    filterBar(showIcons: true)
-                    filterBar(showIcons: false)
+                HStack(spacing: 6) {
+                    ViewThatFits(in: .horizontal) {
+                        filterBar(showIcons: true).fixedSize(horizontal: true, vertical: false)
+                        filterBar(showIcons: false).fixedSize(horizontal: true, vertical: false)
+                        ScrollView(.horizontal, showsIndicators: false) { filterBar(showIcons: false).fixedSize(horizontal: true, vertical: false) }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    Button { state.confirmHistoryClear = true } label: {
+                        Label("Очистить", systemImage: "trash").font(.system(size: 12)).fixedSize()
+                    }.buttonStyle(.plain).foregroundStyle(.secondary).help("Очистить историю")
                 }.fixedSize(horizontal: false, vertical: true)
+                .confirmationDialog("Очистить историю?", isPresented: $state.confirmHistoryClear, titleVisibility: .visible) {
+                    Button("Очистить незакреплённые", role: .destructive) { store.clear() }
+                    Button("Очистить всё, включая закреплённые", role: .destructive) { store.clearAll() }
+                    Button("Отмена", role: .cancel) { }
+                } message: {
+                    Text("Сохранённые копии файлов из удалённых записей тоже будут удалены. Текущий системный буфер не изменится.")
+                }
+                .onChange(of: state.confirmHistoryClear) { showing in delegate.editing = showing || state.isEditing }
                 if filtered.isEmpty {
                     Spacer()
                     Text(state.query.isEmpty ? "Скопируй текст или изображение" : "Ничего не найдено")
@@ -157,7 +172,6 @@ struct ContentView: View {
             filterButton("Изображения", icon: showIcons ? "photo" : nil, value: 2)
             filterButton("Файлы", icon: showIcons ? "doc" : nil, value: 3)
             filterButton("Ссылки", icon: showIcons ? "link" : nil, value: 4)
-            Spacer(minLength: 0)
         }
     }
     func filterButton(_ title: String, icon: String?, value: Int) -> some View {
@@ -223,6 +237,7 @@ struct ContentView: View {
     }
     func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         let root = store.filesDirectory
+        let generation = store.importGeneration
         for provider in providers {
             provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { value, error in
                 let url: URL?
@@ -235,7 +250,7 @@ struct ContentView: View {
                 }
                 do {
                     let clip = try FileVault.copy(url, into: root)
-                    Task { @MainActor in store.addImported(clip) }
+                    Task { @MainActor in store.addImported(clip, generation: generation) }
                 } catch { Task { @MainActor in store.errorMessage = "Не удалось добавить файл: \(error.localizedDescription)" } }
             }
         }
