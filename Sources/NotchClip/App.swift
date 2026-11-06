@@ -2,10 +2,12 @@ import AppKit
 import SwiftUI
 import Carbon
 
+#if !NOTCHCLIP_TESTING
 @main struct NotchClipApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     var body: some Scene { Settings { EmptyView() } }
 }
+#endif
 
 final class ClipPanel: NSPanel {
     var onEscape: (() -> Void)?
@@ -17,7 +19,9 @@ final class ClipPanel: NSPanel {
 }
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
-    let store = ClipboardStore()
+    let store: ClipboardStore
+    override init() { self.store = ClipboardStore(); super.init() }
+    init(store: ClipboardStore) { self.store = store; super.init() }
     @Published var expanded = false
     @Published var editing = false
     var panel: ClipPanel!
@@ -116,7 +120,8 @@ final class ClipPanel: NSPanel {
         placePanel(on: screen)
         expanded = false
         panel.contentView?.layoutSubtreeIfNeeded()
-        panel.makeKeyAndOrderFront(nil)
+        if held { panel.makeKeyAndOrderFront(nil) }
+        else { panel.orderFrontRegardless() }
         let token = UUID(); openToken = token
         // Give AppKit one frame to present the collapsed shape before expanding it.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { [weak self] in
