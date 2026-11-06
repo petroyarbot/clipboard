@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 final class ViewState: ObservableObject {
     @Published var query = ""
@@ -8,6 +9,12 @@ final class ViewState: ObservableObject {
     @Published var filter = 0
     @Published var editingID: UUID?
     @Published var editText = ""
+    @Published var previewID: UUID?
+    @Published var isEditing = false
+    @Published var widthDraft = ""
+    @Published var heightDraft = ""
+    @Published var settingsError: String?
+    @Published var dropTargeted = false
 }
 
 struct ContentView: View {
@@ -26,8 +33,10 @@ struct ContentView: View {
 
     var filtered: [Clip] {
         store.history.ordered.filter { clip in
-            let typeMatches = state.filter == 0 || (state.filter == 1 && clip.kind == .text) || (state.filter == 2 && clip.kind == .image)
-            let queryMatches = state.query.isEmpty || (clip.kind == .text && (String(data: clip.data, encoding: .utf8) ?? "").localizedCaseInsensitiveContains(state.query))
+            let isLink = link(for: clip) != nil
+            let typeMatches = state.filter == 0 || (state.filter == 1 && clip.kind == .text && !isLink) || (state.filter == 2 && clip.kind == .image) || (state.filter == 3 && clip.kind == .file) || (state.filter == 4 && isLink)
+            let value = clip.kind == .file ? fileName(for: clip) : (String(data: clip.data, encoding: .utf8) ?? "")
+            let queryMatches = state.query.isEmpty || value.localizedCaseInsensitiveContains(state.query)
             return typeMatches && queryMatches
         }
     }
@@ -47,110 +56,232 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .preferredColorScheme(.dark)
         .onChange(of: delegate.expanded) { open in
-            if !open { state.editingID = nil; state.showingSettings = false }
+            if !open { state.editingID = nil; state.previewID = nil; state.isEditing = false; state.showingSettings = false }
         }
     }
     var content: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Image(systemName: "clipboard").font(.system(size: 15, weight: .semibold)).foregroundStyle(.white.opacity(0.8))
-                Text("Буфер обмена").font(.system(size: 16, weight: .semibold))
-                Spacer()
-                Button { state.showingSettings.toggle() } label: { Image(systemName: state.showingSettings ? "gearshape.fill" : "gearshape").frame(width: 30, height: 30).contentShape(Rectangle()) }.buttonStyle(.plain).accessibilityLabel("Настройки").help("Настройки")
-                Button { delegate.close() } label: { Image(systemName: "xmark").frame(width: 30, height: 30).contentShape(Rectangle()) }.buttonStyle(.plain).accessibilityLabel("Закрыть").help("Закрыть")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "clipboard").font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+                Text(state.showingSettings ? "Настройки" : state.previewID != nil ? "Просмотр" : "Буфер обмена")
+                    .font(.system(size: 15, weight: .semibold)).fixedSize()
+                if !state.showingSettings && state.previewID == nil {
+                    HStack(spacing: 7) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                        TextField("Поиск в истории", text: $state.query).textFieldStyle(.plain)
+                            .font(.system(size: 13))
+                    }.padding(.horizontal, 10).frame(height: 32)
+                        .modifier(GlassSurface(reduceTransparency: reduceTransparency))
+                } else { Spacer(minLength: 0) }
+                Button {
+                    if state.previewID != nil { closePreview() }
+                    else { state.showingSettings.toggle(); state.widthDraft = String(Int(panelWidth)); state.heightDraft = String(Int(panelHeight)) }
+                } label: {
+                    Image(systemName: state.showingSettings || state.previewID != nil ? "chevron.left" : "slider.horizontal.3")
+                        .frame(width: 32, height: 32).contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel(state.showingSettings || state.previewID != nil ? "Назад к истории" : "Настройки").help(state.showingSettings || state.previewID != nil ? "Назад к истории" : "Настройки")
+                Button { delegate.close() } label: {
+                    Image(systemName: "xmark").frame(width: 28, height: 32).contentShape(Rectangle())
+                }.buttonStyle(.plain).accessibilityLabel("Закрыть").help("Закрыть")
             }
             if let error = store.errorMessage {
                 Text(error).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
             }
             if state.showingSettings {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 9) {
-                        Toggle("Открывать при наведении", isOn: $hoverEnabled)
-                        Picker("Горячая клавиша", selection: $shortcut) {
-                            Text("⌘ ⇧ V").tag(0); Text("⌘ ⇧ C").tag(1); Text("⌘ ⇧ Space").tag(2)
-                        }.onChange(of: shortcut) { _ in delegate.registerShortcut() }
-                        settingSlider("Ширина", value: $panelWidth, range: 420...800, step: 10, unit: "пт")
-                            .onChange(of: panelWidth) { _ in delegate.updatePanelSize() }
-                        settingSlider("Высота", value: $panelHeight, range: 360...650, step: 10, unit: "пт")
-                            .onChange(of: panelHeight) { _ in delegate.updatePanelSize() }
-                        settingSlider("Длительность", value: $animationDuration, range: 0.2...0.8, step: 0.05, unit: "с")
-                        settingSlider("Упругость", value: $animationBounce, range: 0...0.35, step: 0.05, unit: "")
-                        settingSlider("Задержка открытия", value: $hoverOpenDelay, range: 0...0.8, step: 0.05, unit: "с")
-                        settingSlider("Задержка закрытия", value: $hoverCloseDelay, range: 0...1.5, step: 0.05, unit: "с")
-                        Text("История хранится локально без шифрования.").font(.caption).foregroundStyle(.secondary)
-                        Button("Очистить незакреплённую историю", role: .destructive) { state.confirmClear = true }
-                            .confirmationDialog("Удалить незакреплённые записи?", isPresented: $state.confirmClear) {
-                                Button("Очистить", role: .destructive) { store.clear() }
-                            }
-                        Button("Выйти из NotchClip") { NSApp.terminate(nil) }
-                    }.padding(10)
-                }.frame(maxHeight: 240).background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-            }
-
-            HStack(spacing: 9) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Поиск в истории", text: $state.query).textFieldStyle(.plain)
-                    .font(.system(size: 14))
-            }.padding(.horizontal, 12).padding(.vertical, 10).modifier(GlassSurface(reduceTransparency: reduceTransparency))
-            Picker("Фильтр", selection: $state.filter) {
-                Text("Все").tag(0); Text("Текст").tag(1); Text("Изображения").tag(2)
-            }.pickerStyle(.segmented)
-            if filtered.isEmpty {
-                Spacer(); Text(state.query.isEmpty ? "Здесь появится скопированное" : "Ничего не найдено").foregroundStyle(.secondary).frame(maxWidth: .infinity); Spacer()
+                settings
+            } else if let id = state.previewID, let clip = store.history.clips.first(where: { $0.id == id }) {
+                preview(clip)
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 5) {
-                        if filtered.contains(where: \.isPinned) { section("Закреплено", items: filtered.filter(\.isPinned)) }
-                        if filtered.contains(where: { !$0.isPinned }) { section("Недавние", items: filtered.filter { !$0.isPinned }) }
+                ViewThatFits(in: .horizontal) {
+                    filterBar(showIcons: true)
+                    filterBar(showIcons: false)
+                }.fixedSize(horizontal: false, vertical: true)
+                if filtered.isEmpty {
+                    Spacer()
+                    Text(state.query.isEmpty ? "Скопируй текст или изображение" : "Ничего не найдено")
+                        .foregroundStyle(.secondary).font(.system(size: 13)).frame(maxWidth: .infinity)
+                    Spacer()
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(filtered) { clip in row(clip) }
+                        }
                     }
                 }
             }
-            HStack { Text("Выбери запись, затем нажми ⌘V"); Spacer(); Text("\(store.history.clips.count) записей") }.font(.caption).foregroundStyle(.secondary)
+        }
+        .overlay(alignment: .bottom) {
+            if state.dropTargeted { Text("Отпусти, чтобы сохранить копию файла").font(.system(size: 13, weight: .medium)).padding(10).background(.ultraThinMaterial, in: Capsule()) }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: $state.dropTargeted, perform: handleDrop)
+    }
+    var settings: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 11) {
+                Toggle("Открывать при наведении", isOn: $hoverEnabled)
+                Picker("Горячая клавиша", selection: $shortcut) {
+                    Text("⌘ ⇧ V").tag(0); Text("⌘ ⇧ C").tag(1); Text("⌘ ⇧ Space").tag(2)
+                }.onChange(of: shortcut) { _ in delegate.registerShortcut() }
+                Text("Размер панели").font(.system(size: 13, weight: .semibold))
+                HStack(spacing: 7) {
+                    sizePreset("Компактный", width: 480, height: 400)
+                    sizePreset("Средний", width: 620, height: 500)
+                    sizePreset("Большой", width: 760, height: 600)
+                }
+                HStack(spacing: 8) {
+                    TextField("Ширина", text: $state.widthDraft).textFieldStyle(.roundedBorder).frame(minWidth: 65, maxWidth: 100)
+                    Text("×").foregroundStyle(.secondary)
+                    TextField("Высота", text: $state.heightDraft).textFieldStyle(.roundedBorder).frame(minWidth: 65, maxWidth: 100)
+                    Button("Применить", action: applySize)
+                }
+                Text("Ширина 420–800, высота 360–650 пт").font(.caption).foregroundStyle(.secondary)
+                if let error = state.settingsError { Text(error).font(.caption).foregroundStyle(.orange) }
+                settingStepper("Длительность", value: $animationDuration, range: 0.2...0.8, step: 0.05, unit: "с")
+                settingStepper("Упругость", value: $animationBounce, range: 0...0.35, step: 0.05, unit: "")
+                settingStepper("Задержка открытия", value: $hoverOpenDelay, range: 0...0.8, step: 0.05, unit: "с")
+                settingStepper("Задержка закрытия", value: $hoverCloseDelay, range: 0...1.5, step: 0.05, unit: "с")
+                Text("История хранится локально без шифрования.").font(.caption).foregroundStyle(.secondary)
+                Button("Очистить незакреплённую историю", role: .destructive) { state.confirmClear = true }
+                    .confirmationDialog("Удалить незакреплённые записи?", isPresented: $state.confirmClear) {
+                        Button("Очистить", role: .destructive) { store.clear() }
+                    }
+                Button("Выйти из NotchClip") { NSApp.terminate(nil) }
+            }.padding(.vertical, 8).padding(.horizontal, 4)
         }
     }
-    func settingSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double, unit: String) -> some View {
-        HStack {
-            Text(title).frame(width: 145, alignment: .leading)
-            Slider(value: value, in: range, step: step)
-            Text(unit == "пт" ? "\(Int(value.wrappedValue)) \(unit)" : String(format: "%.2f %@", value.wrappedValue, unit))
-                .monospacedDigit().frame(width: 65, alignment: .trailing)
+    func filterBar(showIcons: Bool) -> some View {
+        HStack(spacing: 5) {
+            filterButton("Все", icon: nil, value: 0)
+            filterButton("Текст", icon: showIcons ? "text.alignleft" : nil, value: 1)
+            filterButton("Изображения", icon: showIcons ? "photo" : nil, value: 2)
+            filterButton("Файлы", icon: showIcons ? "doc" : nil, value: 3)
+            filterButton("Ссылки", icon: showIcons ? "link" : nil, value: 4)
+            Spacer(minLength: 0)
+        }
+    }
+    func filterButton(_ title: String, icon: String?, value: Int) -> some View {
+        Button { state.filter = value } label: {
+            HStack(spacing: 5) {
+                if let icon { Image(systemName: icon) }
+                Text(title)
+            }.font(.system(size: 12, weight: state.filter == value ? .semibold : .regular))
+                .padding(.horizontal, 8).frame(height: 27)
+                .background(state.filter == value ? Color.white.opacity(0.22) : Color.white.opacity(0.06), in: Capsule())
+        }.buttonStyle(.plain).accessibilityLabel(title).accessibilityAddTraits(state.filter == value ? .isSelected : [])
+    }
+
+    func sizePreset(_ title: String, width: Double, height: Double) -> some View {
+        Button(title) { panelWidth = width; panelHeight = height; state.widthDraft = String(Int(width)); state.heightDraft = String(Int(height)); state.settingsError = nil; delegate.updatePanelSize() }
+            .font(.system(size: 12)).controlSize(.small)
+    }
+    func applySize() {
+        guard let w = Double(state.widthDraft), let h = Double(state.heightDraft), (420...800).contains(w), (360...650).contains(h) else {
+            state.settingsError = "Введи размеры в указанном диапазоне."; return
+        }
+        panelWidth = w; panelHeight = h; state.settingsError = nil; delegate.updatePanelSize()
+    }
+    func settingStepper(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double, unit: String) -> some View {
+        Stepper(value: value, in: range, step: step) {
+            HStack { Text(title); Spacer(); Text(String(format: "%.2f %@", value.wrappedValue, unit)).foregroundStyle(.secondary).monospacedDigit() }
         }.font(.system(size: 13))
     }
-    func section(_ title: String, items: [Clip]) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).padding(.top, 4)
-            ForEach(items) { clip in row(clip) }
+    func link(for clip: Clip) -> URL? { clip.linkURL }
+    func fileName(for clip: Clip) -> String { (try? JSONDecoder().decode(StoredFile.self, from: clip.data))?.name ?? "Файл" }
+    func closePreview() { state.previewID = nil; state.isEditing = false; delegate.editing = false }
+    func openPreview(_ clip: Clip, edit: Bool = false) {
+        state.previewID = clip.id; state.isEditing = edit; state.editText = String(data: clip.data, encoding: .utf8) ?? ""; delegate.editing = edit
+    }
+    func preview(_ clip: Clip) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(clip.kind == .image ? "Просмотр изображения" : clip.kind == .file ? fileName(for: clip) : "Просмотр текста")
+                    .font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Spacer()
+                if clip.kind == .text && !state.isEditing {
+                    Button("Редактировать") { state.isEditing = true; delegate.editing = true }
+                }
+                if state.isEditing {
+                    Button("Отмена") { state.isEditing = false; delegate.editing = false; state.editText = String(data: clip.data, encoding: .utf8) ?? "" }
+                    Button("Сохранить") { store.edit(clip.id, text: state.editText); state.isEditing = false; delegate.editing = false }.disabled(state.editText.isEmpty)
+                } else { Button("Копировать") { delegate.select(clip) } }
+            }
+            if clip.kind == .text {
+                if state.isEditing {
+                    TextEditor(text: $state.editText).font(.system(size: 14)).scrollContentBackground(.hidden)
+                        .padding(8).background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
+                } else {
+                    ScrollView { Text(String(data: clip.data, encoding: .utf8) ?? "").font(.system(size: 14)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(10) }
+                        .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+                }
+            } else if clip.kind == .image, let image = NSImage(data: clip.data) {
+                GeometryReader { geometry in Image(nsImage: image).resizable().scaledToFit().frame(width: geometry.size.width, height: geometry.size.height) }
+            } else {
+                Spacer(); Label(fileName(for: clip), systemImage: "doc").frame(maxWidth: .infinity); Spacer()
+            }
+        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+    func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        let root = store.filesDirectory
+        for provider in providers {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { value, error in
+                let url: URL?
+                if let data = value as? Data { url = URL(dataRepresentation: data, relativeTo: nil) }
+                else if let itemURL = value as? URL { url = itemURL }
+                else { url = nil }
+                guard let url else {
+                    Task { @MainActor in store.errorMessage = "Не удалось получить перетаскиваемый файл." }
+                    return
+                }
+                do {
+                    let clip = try FileVault.copy(url, into: root)
+                    Task { @MainActor in store.addImported(clip) }
+                } catch { Task { @MainActor in store.errorMessage = "Не удалось добавить файл: \(error.localizedDescription)" } }
+            }
+        }
+        return !providers.isEmpty
+    }
+    @ViewBuilder func row(_ clip: Clip) -> some View {
+        if clip.kind == .file {
+            rowContent(clip).onDrag {
+                guard let url = store.exportFile(for: clip) else { return NSItemProvider() }
+                return NSItemProvider(object: url as NSURL)
+            }
+        } else { rowContent(clip) }
+    }
+    func rowContent(_ clip: Clip) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 9) {
+                Button { delegate.select(clip) } label: {
+                    HStack(spacing: 9) {
+                        if clip.kind == .image, let image = NSImage(data: clip.data) {
+                            Image(nsImage: image).resizable().scaledToFill().frame(width: 44, height: 30).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
+                            Text("Изображение").lineLimit(1)
+                        } else {
+                            Image(systemName: clip.kind == .file ? "doc" : link(for: clip) != nil ? "link" : "doc.text")
+                                .font(.system(size: 13)).foregroundStyle(.secondary).frame(width: 28, height: 28)
+                                .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                            Text(clip.kind == .file ? fileName(for: clip) : (String(data: clip.data, encoding: .utf8) ?? ""))
+                                .lineLimit(1).truncationMode(.tail)
+                        }
+                        Spacer(minLength: 4)
+                    }.frame(maxWidth: .infinity, minHeight: 34, alignment: .leading).contentShape(Rectangle())
+                }.buttonStyle(.plain).help("Вернуть в буфер обмена")
+                if clip.isPinned { Image(systemName: "pin.fill").font(.system(size: 11)).foregroundStyle(.purple).help("Закреплено") }
+                Text(clip.createdAt, style: .relative).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).fixedSize()
+                Button { openPreview(clip) } label: { Image(systemName: "eye").frame(width: 26, height: 28).contentShape(Rectangle()) }
+                    .buttonStyle(.plain).accessibilityLabel("Просмотр записи").help("Просмотр")
+            }.font(.system(size: 13)).padding(.horizontal, 4).padding(.vertical, 1)
+            Rectangle().fill(Color.white.opacity(0.09)).frame(height: 1).padding(.leading, 41)
+        }.contentShape(Rectangle()).contextMenu {
+            Button("Просмотреть", systemImage: "eye") { openPreview(clip) }
+            Button("Копировать", systemImage: "doc.on.doc") { delegate.select(clip) }
+            Button(clip.isPinned ? "Открепить" : "Закрепить", systemImage: clip.isPinned ? "pin.slash" : "pin") { store.togglePin(clip.id) }
+            if clip.kind == .text { Button("Редактировать", systemImage: "pencil") { openPreview(clip, edit: true) } }
+            Button("Удалить", systemImage: "trash", role: .destructive) { store.remove(clip.id) }
         }
     }
-    func row(_ clip: Clip) -> some View {
-        HStack(spacing: 10) {
-            if state.editingID == clip.id {
-                TextField("Текст", text: $state.editText, axis: .vertical).lineLimit(2...4).textFieldStyle(.roundedBorder)
-                Button("Сохранить") { store.edit(clip.id, text: state.editText); finishEditing() }.disabled(state.editText.isEmpty)
-                Button("Отмена") { finishEditing() }
-            } else {
-                Button { delegate.select(clip) } label: {
-                    HStack {
-                        if clip.kind == .image, let image = NSImage(data: clip.data) {
-                            Image(nsImage: image).resizable().scaledToFit().frame(width: 72, height: 42).clipShape(RoundedRectangle(cornerRadius: 5))
-                            Text("Изображение").foregroundStyle(.primary)
-                        } else {
-                            Image(systemName: "doc.text").foregroundStyle(.secondary)
-                            Text(String(data: clip.data, encoding: .utf8) ?? "").lineLimit(2).multilineTextAlignment(.leading).foregroundStyle(.primary)
-                        }
-                        Spacer()
-                    }.frame(maxWidth: .infinity, minHeight: 40, alignment: .leading).contentShape(Rectangle())
-                }.buttonStyle(.plain)
-                Button { store.togglePin(clip.id) } label: { Image(systemName: clip.isPinned ? "pin.fill" : "pin") }.buttonStyle(.plain).foregroundStyle(clip.isPinned ? .purple : .secondary).help(clip.isPinned ? "Открепить" : "Закрепить")
-                if clip.kind == .text {
-                    Button { state.editingID = clip.id; state.editText = String(data: clip.data, encoding: .utf8) ?? ""; delegate.editing = true } label: { Image(systemName: "pencil") }.buttonStyle(.plain).help("Редактировать")
-                }
-                Button { store.remove(clip.id) } label: { Image(systemName: "trash") }.buttonStyle(.plain).foregroundStyle(.secondary).help("Удалить")
-            }
-        }.font(.system(size: 14)).padding(.horizontal, 12).padding(.vertical, 5)
-            .background(.white.opacity(clip.isPinned ? 0.11 : 0.055), in: RoundedRectangle(cornerRadius: 10))
-    }
-    func finishEditing() { state.editingID = nil; delegate.editing = false }
+
 }
 
 // The top edge stays attached to the screen while the lower corners expand.
