@@ -15,6 +15,12 @@ struct ContentView: View {
     @ObservedObject var delegate: AppDelegate
     @AppStorage("hoverEnabled") var hoverEnabled = true
     @AppStorage("shortcut") var shortcut = 0
+    @AppStorage("panelWidth") var panelWidth = 620.0
+    @AppStorage("panelHeight") var panelHeight = 500.0
+    @AppStorage("animationDuration") var animationDuration = 0.45
+    @AppStorage("animationBounce") var animationBounce = 0.12
+    @AppStorage("hoverOpenDelay") var hoverOpenDelay = 0.12
+    @AppStorage("hoverCloseDelay") var hoverCloseDelay = 0.45
     @StateObject private var state = ViewState()
 
     var filtered: [Clip] {
@@ -25,19 +31,23 @@ struct ContentView: View {
         }
     }
     var body: some View {
-        ZStack(alignment: .top) {
-            RoundedRectangle(cornerRadius: delegate.expanded ? 28 : 14, style: .continuous)
-                .fill(Color.black)
-                .frame(width: delegate.expanded ? 620 : 190, height: delegate.expanded ? 500 : 28)
-            if delegate.expanded {
-                content.padding(.horizontal, 22).padding(.top, 36).padding(.bottom, 18)
-                    .frame(width: 620, height: 500)
-                    .transition(.opacity.animation(.easeInOut(duration: 0.16)))
-            }
-        }.frame(width: 620, height: 500, alignment: .top).preferredColorScheme(.dark)
-            .onChange(of: delegate.expanded) { open in
-                if !open { state.editingID = nil; state.showingSettings = false }
-            }
+        let width = delegate.expanded ? panelWidth : Double(delegate.collapsedWidth)
+        let height = delegate.expanded ? panelHeight : Double(delegate.collapsedHeight)
+        let shape = NotchShape()
+        shape.fill(Color.black)
+        .frame(width: width, height: height, alignment: .top)
+        .overlay(alignment: .top) {
+            content.padding(.horizontal, 22).padding(.top, max(delegate.collapsedHeight + 8, 36)).padding(.bottom, 18)
+                .frame(width: panelWidth, height: panelHeight, alignment: .top)
+                .opacity(delegate.expanded ? 1 : 0)
+                .allowsHitTesting(delegate.expanded)
+        }
+        .clipShape(shape)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .preferredColorScheme(.dark)
+        .onChange(of: delegate.expanded) { open in
+            if !open { state.editingID = nil; state.showingSettings = false }
+        }
     }
     var content: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -51,19 +61,30 @@ struct ContentView: View {
                 Text(error).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
             }
             if state.showingSettings {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Открывать при наведении сверху", isOn: $hoverEnabled)
-                    Picker("Горячая клавиша", selection: $shortcut) {
-                        Text("⌘ ⇧ V").tag(0); Text("⌘ ⇧ C").tag(1); Text("⌘ ⇧ Space").tag(2)
-                    }.onChange(of: shortcut) { _ in delegate.registerShortcut() }
-                    Text("История хранится локально без шифрования.").font(.caption).foregroundStyle(.secondary)
-                    Button("Очистить незакреплённую историю", role: .destructive) { state.confirmClear = true }
-                        .confirmationDialog("Удалить незакреплённые записи?", isPresented: $state.confirmClear) {
-                            Button("Очистить", role: .destructive) { store.clear() }
-                        }
-                    Button("Выйти из NotchClip") { NSApp.terminate(nil) }
-                }.padding(10).background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 9) {
+                        Toggle("Открывать при наведении", isOn: $hoverEnabled)
+                        Picker("Горячая клавиша", selection: $shortcut) {
+                            Text("⌘ ⇧ V").tag(0); Text("⌘ ⇧ C").tag(1); Text("⌘ ⇧ Space").tag(2)
+                        }.onChange(of: shortcut) { _ in delegate.registerShortcut() }
+                        settingSlider("Ширина", value: $panelWidth, range: 420...800, step: 10, unit: "пт")
+                            .onChange(of: panelWidth) { _ in delegate.updatePanelSize() }
+                        settingSlider("Высота", value: $panelHeight, range: 360...650, step: 10, unit: "пт")
+                            .onChange(of: panelHeight) { _ in delegate.updatePanelSize() }
+                        settingSlider("Длительность", value: $animationDuration, range: 0.2...0.8, step: 0.05, unit: "с")
+                        settingSlider("Упругость", value: $animationBounce, range: 0...0.35, step: 0.05, unit: "")
+                        settingSlider("Задержка открытия", value: $hoverOpenDelay, range: 0...0.8, step: 0.05, unit: "с")
+                        settingSlider("Задержка закрытия", value: $hoverCloseDelay, range: 0...1.5, step: 0.05, unit: "с")
+                        Text("История хранится локально без шифрования.").font(.caption).foregroundStyle(.secondary)
+                        Button("Очистить незакреплённую историю", role: .destructive) { state.confirmClear = true }
+                            .confirmationDialog("Удалить незакреплённые записи?", isPresented: $state.confirmClear) {
+                                Button("Очистить", role: .destructive) { store.clear() }
+                            }
+                        Button("Выйти из NotchClip") { NSApp.terminate(nil) }
+                    }.padding(10)
+                }.frame(maxHeight: 240).background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
             }
+
             HStack {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Поиск в истории", text: $state.query).textFieldStyle(.plain)
@@ -83,6 +104,14 @@ struct ContentView: View {
             }
             HStack { Text("Выбери запись, затем нажми ⌘V"); Spacer(); Text("\(store.history.clips.count) записей") }.font(.caption).foregroundStyle(.secondary)
         }
+    }
+    func settingSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double, unit: String) -> some View {
+        HStack {
+            Text(title).frame(width: 145, alignment: .leading)
+            Slider(value: value, in: range, step: step)
+            Text(unit == "пт" ? "\(Int(value.wrappedValue)) \(unit)" : String(format: "%.2f %@", value.wrappedValue, unit))
+                .monospacedDigit().frame(width: 65, alignment: .trailing)
+        }.font(.caption)
     }
     func section(_ title: String, items: [Clip]) -> some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -118,4 +147,23 @@ struct ContentView: View {
         }.padding(.horizontal, 10).padding(.vertical, 3).background(.white.opacity(clip.isPinned ? 0.10 : 0.04), in: RoundedRectangle(cornerRadius: 8))
     }
     func finishEditing() { state.editingID = nil; delegate.editing = state.showingSettings }
+}
+
+// The top edge stays attached to the screen while the lower corners expand.
+struct NotchShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let top = min(16, rect.width / 6, rect.height / 3)
+        let bottom = min(26, rect.width / 3, max(0, rect.height - top))
+        var path = Path()
+        path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+        path.addQuadCurve(to: CGPoint(x: rect.minX + top, y: rect.minY + top), control: CGPoint(x: rect.minX + top, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX + top, y: rect.maxY - bottom))
+        path.addQuadCurve(to: CGPoint(x: rect.minX + top + bottom, y: rect.maxY), control: CGPoint(x: rect.minX + top, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.maxX - top - bottom, y: rect.maxY))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX - top, y: rect.maxY - bottom), control: CGPoint(x: rect.maxX - top, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.maxX - top, y: rect.minY + top))
+        path.addQuadCurve(to: CGPoint(x: rect.maxX, y: rect.minY), control: CGPoint(x: rect.maxX - top, y: rect.minY))
+        path.closeSubpath()
+        return path
+    }
 }

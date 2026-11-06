@@ -29,9 +29,19 @@ final class ClipPanel: NSPanel {
     var heldOpen = false
     var closeWork: DispatchWorkItem?
     var hideWork: DispatchWorkItem?
+    var openWork: DispatchWorkItem?
+    var openToken = UUID()
+    @Published var collapsedWidth: CGFloat = 190
+    @Published var collapsedHeight: CGFloat = 28
     @AppStorage("hoverEnabled") var hoverEnabled = true
     @AppStorage("shortcut") var shortcut = 0
-    let size = NSSize(width: 620, height: 500)
+    @AppStorage("panelWidth") var panelWidth = 620.0
+    @AppStorage("panelHeight") var panelHeight = 500.0
+    @AppStorage("animationDuration") var animationDuration = 0.45
+    @AppStorage("animationBounce") var animationBounce = 0.12
+    @AppStorage("hoverOpenDelay") var hoverOpenDelay = 0.12
+    @AppStorage("hoverCloseDelay") var hoverCloseDelay = 0.45
+    var size: NSSize { NSSize(width: panelWidth, height: panelHeight) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -41,7 +51,11 @@ final class ClipPanel: NSPanel {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
         panel.onEscape = { [weak self] in self?.close() }
-        panel.contentView = NSHostingView(rootView: ContentView(store: store, delegate: self))
+        let hosting = NSHostingView(rootView: ContentView(store: store, delegate: self).ignoresSafeArea())
+        hosting.sizingOptions = []
+        hosting.frame = NSRect(origin: .zero, size: size)
+        hosting.autoresizingMask = [.width, .height]
+        panel.contentView = hosting
         status = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         status.button?.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: "NotchClip")
         status.button?.target = self; status.button?.action = #selector(toggle)
@@ -71,13 +85,22 @@ final class ClipPanel: NSPanel {
             notchWidth = max(180, frame.width - left.width - right.width)
         } else { notchWidth = 200 }
         let insideTrigger = abs(point.x - frame.midX) < notchWidth / 2 && point.y >= frame.maxY - max(screen.safeAreaInsets.top, 8)
-        if hoverEnabled && insideTrigger && !wasInTrigger && !expanded { show(on: screen, held: false) }
+        if hoverEnabled && insideTrigger && !wasInTrigger && !expanded {
+            let work = DispatchWorkItem { [weak self, weak screen] in
+                guard let self, let screen else { return }
+                self.openWork = nil
+                self.show(on: screen, held: false)
+            }
+            openWork?.cancel(); openWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + hoverOpenDelay, execute: work)
+        }
+        if !insideTrigger { openWork?.cancel(); openWork = nil }
         wasInTrigger = insideTrigger
         guard expanded, !heldOpen, !editing else { closeWork?.cancel(); closeWork = nil; return }
         if insideTrigger || panel.frame.contains(point) { closeWork?.cancel(); closeWork = nil }
         else if closeWork == nil {
             let work = DispatchWorkItem { [weak self] in self?.close() }
-            closeWork = work; DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+            closeWork = work; DispatchQueue.main.asyncAfter(deadline: .now() + hoverCloseDelay, execute: work)
         }
     }
     @objc func toggle() {
@@ -86,19 +109,43 @@ final class ClipPanel: NSPanel {
     }
     func show(on screen: NSScreen?, held: Bool) {
         guard let screen else { return }
+        openWork?.cancel(); openWork = nil
         closeWork?.cancel(); closeWork = nil; hideWork?.cancel()
         heldOpen = held
-        panel.setFrameOrigin(NSPoint(x: screen.frame.midX - size.width / 2, y: screen.frame.maxY - size.height))
+        if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
+            collapsedWidth = max(100, screen.frame.width - left.width - right.width)
+            collapsedHeight = max(20, screen.safeAreaInsets.top)
+        } else { collapsedWidth = 190; collapsedHeight = 24 }
+        placePanel(on: screen)
+        expanded = false
+        panel.contentView?.layoutSubtreeIfNeeded()
         panel.makeKeyAndOrderFront(nil)
-        withAnimation(animation) { expanded = true }
+        let token = UUID(); openToken = token
+        // Give AppKit one frame to present the collapsed shape before expanding it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) { [weak self] in
+            guard let self, self.openToken == token else { return }
+            withAnimation(self.animation) { self.expanded = true }
+        }
     }
-    var animation: Animation? { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.86) }
+    func placePanel(on screen: NSScreen) {
+        let width = min(size.width, screen.frame.width)
+        let height = min(size.height, screen.frame.height)
+        panel.setFrame(NSRect(x: screen.frame.midX - width / 2, y: screen.frame.maxY - height, width: width, height: height), display: true)
+    }
+    func updatePanelSize() {
+        if let screen = panel.screen ?? NSScreen.main { placePanel(on: screen) }
+    }
+    var animation: Animation? {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? nil : .spring(response: animationDuration, dampingFraction: 1 - animationBounce)
+    }
     func close() {
+        openToken = UUID(); openWork?.cancel(); openWork = nil
         closeWork?.cancel(); closeWork = nil; heldOpen = false; editing = false
         withAnimation(animation) { expanded = false }
         let work = DispatchWorkItem { [weak self] in self?.panel.orderOut(nil) }
         hideWork?.cancel(); hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + (NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.4), execute: work)
+        let delay = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : animationDuration + 0.25
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
     func select(_ clip: Clip) { store.select(clip); close() }
     func applicationWillTerminate(_ notification: Notification) {
