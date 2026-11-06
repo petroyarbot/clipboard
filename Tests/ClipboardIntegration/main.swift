@@ -8,6 +8,15 @@ import Foundation
   defer { try? FileManager.default.removeItem(at:root) }
   let file = root.appendingPathComponent("history.json")
   let store = ClipboardStore(pasteboard:board,fileURL:file)
+  let htmlItem = NSPasteboardItem()
+  let htmlText = "<section><h1>Новый текст</h1></section>"
+  htmlItem.setString(htmlText, forType: .string)
+  htmlItem.setString("<pre>&lt;section&gt;Новый текст&lt;/section&gt;</pre>", forType: .html)
+  board.clearContents(); board.writeObjects([htmlItem])
+  let htmlChange = board.changeCount
+  store.poll()
+  precondition(board.changeCount == htmlChange && board.string(forType: .string) == htmlText)
+  precondition(store.history.clips.first.flatMap { String(data: $0.data, encoding: .utf8) } == htmlText)
   board.clearContents(); board.setString("first",forType:.string); store.poll()
   guard let clip = store.history.clips.first else { fatalError("text missing") }
   store.togglePin(clip.id); store.edit(clip.id,text:"edited")
@@ -57,6 +66,19 @@ import Foundation
   guard let copied = store.history.clips.first(where: { $0.kind == .file }), let copyURL = store.managedFileURL(for: copied) else { fatalError("pasteboard file missing") }
   let copiedBytes = try Data(contentsOf: copyURL)
   precondition(copiedBytes == Data("clipboard file".utf8))
-  print("PASS: text, image, files, selection, pin, edit, persistence, legacy migration and limit")
+  let pendingGeneration = store.importGeneration
+  let pending = try FileVault.copy(copiedSource, into: store.filesDirectory)
+  let pendingURL = store.managedFileURL(for: pending)!
+  let beforeClear = board.changeCount
+  store.clearAll()
+  precondition(store.history.clips.isEmpty)
+  precondition(!FileManager.default.fileExists(atPath: copyURL.path))
+  precondition(board.changeCount == beforeClear)
+  store.addImported(pending, generation: pendingGeneration)
+  precondition(store.history.clips.isEmpty)
+  precondition(!FileManager.default.fileExists(atPath: pendingURL.path))
+  let afterClear = ClipboardStore(pasteboard: board, fileURL: file)
+  precondition(afterClear.history.clips.isEmpty)
+  print("PASS: HTML, text, images, files, pinning, complete clear, in-flight import and persistence")
  }
 }

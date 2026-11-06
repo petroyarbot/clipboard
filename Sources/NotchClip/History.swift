@@ -53,6 +53,7 @@ struct History: Codable {
     }
     mutating func remove(_ id: UUID) { clips.removeAll { $0.id == id } }
     mutating func clear() { clips.removeAll { !$0.isPinned } }
+    mutating func clearAll() { clips.removeAll() }
     private mutating func trim() {
         var unpinned = 0
         clips.removeAll { item in

@@ -40,6 +40,7 @@ enum FileVault {
     private var changeCount: Int
     private var timer: Timer?
     private var canSave = true
+    private(set) var importGeneration = 0
     var filesDirectory: URL { fileURL.deletingLastPathComponent().appendingPathComponent("Files", isDirectory: true) }
 
     init(pasteboard: NSPasteboard = .general, fileURL: URL? = nil) {
@@ -80,17 +81,18 @@ enum FileVault {
     func importFile(_ url: URL) {
         guard canSave else { errorMessage = "Историю нельзя сохранить."; return }
         let root = filesDirectory
+        let generation = importGeneration
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 let clip = try FileVault.copy(url, into: root)
-                Task { @MainActor in self?.add(clip) }
+                Task { @MainActor in self?.addImported(clip, generation: generation) }
             } catch { Task { @MainActor in self?.errorMessage = "Не удалось добавить файл: \(error.localizedDescription)" } }
         }
     }
-    func addImported(_ clip: Clip) {
-        guard canSave else {
+    func addImported(_ clip: Clip, generation: Int) {
+        guard generation == importGeneration, canSave else {
             if let url = managedFileURL(for: clip) { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-            errorMessage = "Историю нельзя сохранить."
+            if !canSave { errorMessage = "Историю нельзя сохранить." }
             return
         }
         add(clip)
@@ -138,7 +140,8 @@ enum FileVault {
     func togglePin(_ id: UUID) { let previous = history.clips; history.togglePin(id); persistAndClean(previous) }
     func edit(_ id: UUID, text: String) { history.edit(id, text: text); _ = save() }
     func remove(_ id: UUID) { let previous = history.clips; history.remove(id); persistAndClean(previous) }
-    func clear() { let previous = history.clips; history.clear(); persistAndClean(previous) }
+    func clear() { importGeneration += 1; let previous = history.clips; history.clear(); persistAndClean(previous) }
+    func clearAll() { importGeneration += 1; let previous = history.clips; history.clearAll(); persistAndClean(previous) }
     private func add(_ clip: Clip) { let previous = history.clips; history.add(clip); persistAndClean(previous) }
     private func persistAndClean(_ old: [Clip]) {
         guard save() else { return }
