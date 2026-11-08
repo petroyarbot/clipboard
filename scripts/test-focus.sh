@@ -18,6 +18,6 @@ PLIST
 swiftc -parse-as-library -D NOTCHCLIP_TESTING \
   Sources/NotchClip/History.swift Sources/NotchClip/PanelBehavior.swift \
   Sources/NotchClip/ClipboardStore.swift Sources/NotchClip/ContentView.swift \
-  Sources/NotchClip/App.swift Tests/PanelFocus/main.swift \
+  Sources/NotchClip/App.swift Sources/NotchClip/DropImporter.swift Tests/PanelFocus/main.swift \
   -o "$app/Contents/MacOS/FocusCheck"
 "$app/Contents/MacOS/FocusCheck"

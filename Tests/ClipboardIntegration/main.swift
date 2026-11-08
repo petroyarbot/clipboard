@@ -30,6 +30,35 @@ import Foundation
   board.clearContents(); board.writeObjects([image]); store.poll()
   precondition(store.history.clips.first?.kind == .image)
   store.select(store.history.clips.first!); precondition(NSImage(pasteboard:board) != nil)
+  // Some apps include an unusable file URL alongside actual image data.
+  let mixedImage = NSImage(size: NSSize(width: 2, height: 2))
+  mixedImage.lockFocus(); NSColor.blue.setFill(); NSRect(x: 0, y: 0, width: 2, height: 2).fill(); mixedImage.unlockFocus()
+  let mixedItem = NSPasteboardItem()
+  mixedItem.setString(root.absoluteString, forType: .fileURL)
+  mixedItem.setData(mixedImage.tiffRepresentation!, forType: .tiff)
+  let beforeMixed = store.history.clips.map(\.id)
+  board.clearContents(); board.writeObjects([mixedItem]); store.poll()
+  let mixedDeadline = Date().addingTimeInterval(3)
+  while !store.history.clips.contains(where: { !beforeMixed.contains($0.id) && $0.kind == .image }) && Date() < mixedDeadline {
+      RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+  }
+  precondition(store.history.clips.contains(where: { !beforeMixed.contains($0.id) && $0.kind == .image }))
+  precondition(store.errorMessage == nil)
+  // Telegram writes the URL and image as two pasteboard items, not one.
+  let telegramImage = NSImage(size: NSSize(width: 3, height: 3))
+  telegramImage.lockFocus(); NSColor.green.setFill(); NSRect(x: 0, y: 0, width: 3, height: 3).fill(); telegramImage.unlockFocus()
+  let beforeTelegram = store.history.clips.map(\.id)
+  board.clearContents(); precondition(board.writeObjects([root as NSURL, telegramImage])); store.poll()
+  let telegramDeadline = Date().addingTimeInterval(3)
+  while !store.history.clips.contains(where: { !beforeTelegram.contains($0.id) && $0.kind == .image }) && Date() < telegramDeadline {
+      RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+  }
+  precondition(store.history.clips.contains(where: { !beforeTelegram.contains($0.id) && $0.kind == .image }))
+  precondition(store.errorMessage == nil, "Telegram-style clipboard should not report a directory error")
+  let permission = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError)
+  precondition(ClipboardStore.shouldRetryDroppedFileAccess(permission, usedCachedBookmark: true, sourceReadable: false))
+  precondition(!ClipboardStore.shouldRetryDroppedFileAccess(permission, usedCachedBookmark: false, sourceReadable: false))
+  precondition(!ClipboardStore.shouldRetryDroppedFileAccess(permission, usedCachedBookmark: true, sourceReadable: true))
   store.clear(); precondition(store.history.clips.count == 1 && store.history.clips[0].isPinned)
   let legacy = "{\"clips\":[{\"id\":\"9D42AFC8-6B55-4B7A-8743-A5A1EE593777\",\"kind\":\"text\",\"data\":\"b2xk\",\"createdAt\":0}],\"limit\":1}"
   let link = Clip(kind: .text, data: Data("https://example.org/test".utf8))

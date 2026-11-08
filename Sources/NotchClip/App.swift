@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Carbon
+import ServiceManagement
 
 #if !NOTCHCLIP_TESTING
 @main struct NotchClipApp: App {
@@ -24,6 +25,7 @@ final class ClipPanel: NSPanel {
     init(store: ClipboardStore) { self.store = store; super.init() }
     @Published var expanded = false
     @Published var editing = false
+    @Published var dropTargeted = false
     var panel: ClipPanel!
     var status: NSStatusItem!
     var hotKey: EventHotKeyRef?
@@ -54,7 +56,7 @@ final class ClipPanel: NSPanel {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
         panel.onEscape = { [weak self] in self?.close() }
-        let hosting = NSHostingView(rootView: ContentView(store: store, delegate: self).ignoresSafeArea())
+        let hosting = DropHostingView(rootView: AnyView(ContentView(store: store, delegate: self).ignoresSafeArea()), store: store, delegate: self)
         hosting.sizingOptions = []
         hosting.frame = NSRect(origin: .zero, size: size)
         hosting.autoresizingMask = [.width, .height]
@@ -70,10 +72,26 @@ final class ClipPanel: NSPanel {
             return noErr
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &eventHandler)
         registerShortcut(); store.start()
+        setupLoginItem()
         NotificationCenter.default.addObserver(self, selector: #selector(menuDidOpen), name: NSMenu.didBeginTrackingNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(menuDidClose), name: NSMenu.didEndTrackingNotification, object: nil)
         let timer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in Task { @MainActor in self?.checkHover() } }
         RunLoop.main.add(timer, forMode: .common); mouseTimer = timer
+    }
+    func setupLoginItem() {
+        if CommandLine.arguments.contains("--enable-login-item") {
+            do { try SMAppService.mainApp.register() }
+            catch { NSLog("NotchClip login item error: %@", error.localizedDescription) }
+        }
+        let text: String
+        switch SMAppService.mainApp.status {
+        case .enabled: text = "enabled"
+        case .notRegistered: text = "notRegistered"
+        case .requiresApproval: text = "requiresApproval"
+        case .notFound: text = "notFound"
+        @unknown default: text = "unknown"
+        }
+        NSLog("NotchClip login item status: %@", text)
     }
     func registerShortcut() {
         if let hotKey { UnregisterEventHotKey(hotKey); self.hotKey = nil }
