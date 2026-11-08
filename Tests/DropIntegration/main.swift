@@ -8,16 +8,19 @@ import UniformTypeIdentifiers
   let root = FileManager.default.temporaryDirectory.appendingPathComponent("notchclip-drop-test-\(UUID())")
   try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
-  let store = ClipboardStore(pasteboard: NSPasteboard(name: .init("notchclip-general-test-\(UUID())")), fileURL: root.appendingPathComponent("history.json"))
+  let store = ClipboardStore(pasteboard: NSPasteboard(name: .init("notchclip-general-test-\(UUID())")), fileURL: root.appendingPathComponent("history.json"), downloadsDirectory: root.appendingPathComponent("Downloads", isDirectory: true))
   let importer = DropImporter(store: store)
   let permissionFixture = root.appendingPathComponent("permission-check.txt")
   try Data("fixture".utf8).write(to: permissionFixture)
   let readDenied = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError)
   let writeDenied = NSError(domain: NSCocoaErrorDomain, code: NSFileWriteNoPermissionError)
-  precondition(!DropImporter.needsSourcePermission(writeDenied, source: permissionFixture), "writable source must not trigger source permission prompt for vault write error")
+  precondition(!ClipboardStore.needsSourcePermission(writeDenied, source: permissionFixture), "writable source must not trigger source permission prompt for vault write error")
   try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: permissionFixture.path)
-  precondition(DropImporter.needsSourcePermission(readDenied, source: permissionFixture))
-  precondition(DropImporter.needsSourcePermission(writeDenied, source: permissionFixture), "source denial can surface as a copy write error")
+  precondition(ClipboardStore.needsSourcePermission(readDenied, source: permissionFixture))
+  precondition(ClipboardStore.needsSourcePermission(writeDenied, source: permissionFixture), "source denial can surface as a copy write error")
+  precondition(DropImporter.dragTypes.contains(NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-url")))
+  precondition(DropImporter.dragTypes.contains(NSPasteboard.PasteboardType("NSPromiseContentsPboardType")))
+  precondition(DropImporter.dragTypes.contains(NSPasteboard.PasteboardType("org.webmproject.webp")))
   try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: permissionFixture.path)
   func awaitResult(_ predicate: () -> Bool) {
    let deadline = Date().addingTimeInterval(4)
@@ -58,6 +61,29 @@ import UniformTypeIdentifiers
   awaitResult { store.errorMessage != nil }
   guard let error = store.errorMessage else { fatalError("missing file should report an error") }
   precondition(!error.localizedCaseInsensitiveContains("изображение"), "file error incorrectly calls it an image: \(error)")
-  print("PASS: DOCX, PDF, TXT, ZIP, image, web link and missing-file error")
+  // Drag from an app that offers an unreadable file URL plus image bytes: the image is kept, with no error.
+  let locked = root.appendingPathComponent("locked-drop.png")
+  try Data("unreadable".utf8).write(to: locked)
+  try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: locked.path)
+  let lockedImage = NSImage(size: NSSize(width: 2, height: 2)); lockedImage.lockFocus(); NSColor.purple.setFill(); NSRect(x: 0, y: 0, width: 2, height: 2).fill(); lockedImage.unlockFocus()
+  let lockedItem = NSPasteboardItem()
+  lockedItem.setString(locked.absoluteString, forType: .fileURL)
+  lockedItem.setData(lockedImage.tiffRepresentation!, forType: .tiff)
+  store.errorMessage = nil
+  let beforeLocked = store.history.clips.count
+  board.clearContents(); precondition(board.writeObjects([lockedItem])); precondition(importer.canAccept(board)); precondition(importer.importPasteboard(board))
+  awaitResult { store.history.clips.count > beforeLocked || store.errorMessage != nil }
+  precondition(store.history.clips.count > beforeLocked && store.history.clips.first?.kind == .image, "unreadable drop should keep the image bytes")
+  precondition(store.errorMessage == nil, "unreadable drop with image bytes must not report an error: \(store.errorMessage ?? "")")
+  // Drops of a folder import its media files.
+  let folder = root.appendingPathComponent("drop-folder", isDirectory: true)
+  try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+  try Data("pixels".utf8).write(to: folder.appendingPathComponent("shot.png"))
+  let beforeFolder = store.history.clips.count
+  board.clearContents(); precondition(board.writeObjects([folder as NSURL])); precondition(importer.importPasteboard(board))
+  awaitResult { store.history.clips.count >= beforeFolder + 1 || store.errorMessage != nil }
+  precondition(store.history.clips.count == beforeFolder + 1 && store.history.clips.first?.kind == .file, "folder drop should import shot.png")
+  precondition(store.errorMessage == nil)
+  print("PASS: DOCX, PDF, TXT, ZIP, image, web link, unreadable-drop fallback, folder drop and missing-file error")
  }
 }

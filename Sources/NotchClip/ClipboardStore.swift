@@ -1,5 +1,7 @@
 import AppKit
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct StoredFile: Codable {
     let id: UUID
@@ -32,21 +34,112 @@ enum FileVault {
     }
 }
 
+// Raw image bytes that apps put on the pasteboard, converted to PNG for storage.
+enum PasteboardImages {
+    static let types: [NSPasteboard.PasteboardType] = ["public.png", "public.jpeg", "public.heic", "org.webmproject.webp", "public.tiff"].map { NSPasteboard.PasteboardType($0) }
+
+    /// True when the pasteboard offers image data. Reads type names only, so it is cheap on every change.
+    static func hasImage(_ pasteboard: NSPasteboard) -> Bool {
+        (pasteboard.types ?? []).contains { types.contains($0) || $0 == .tiff }
+    }
+
+    /// Copies the bytes of each item's first image type, TIFF as a last resort. Nothing is decoded here.
+    static func rawCandidates(from pasteboard: NSPasteboard) -> [Data] {
+        var candidates: [Data] = []
+        for item in pasteboard.pasteboardItems ?? [] {
+            guard let type = types.first(where: { item.types.contains($0) }), let data = item.data(forType: type) else { continue }
+            candidates.append(data)
+        }
+        if candidates.isEmpty, let tiff = pasteboard.data(forType: .tiff) { candidates.append(tiff) }
+        return candidates
+    }
+
+    // ImageIO decodes PNG, JPEG, HEIC, WebP and TIFF, so every format goes through one path.
+    static func png(from data: Data) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0,
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return output as Data
+    }
+}
+
+// Writes copies into the Downloads folder on a serial background queue.
+enum DownloadsWriter {
+    private static let queue = DispatchQueue(label: "NotchClip.downloads", qos: .utility)
+
+    static func save(named name: String, in directory: URL, write: @escaping (URL) throws -> Void) {
+        queue.async {
+            let base = (name as NSString).deletingPathExtension
+            let ext = (name as NSString).pathExtension
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                var number = 1
+                var target = directory.appendingPathComponent(name)
+                while FileManager.default.fileExists(atPath: target.path) {
+                    number += 1
+                    target = directory.appendingPathComponent(ext.isEmpty ? "\(base) \(number)" : "\(base) \(number).\(ext)")
+                }
+                try write(target)
+            } catch {
+                NSLog("NotchClip: could not save a copy to Downloads: %@", error.localizedDescription)
+            }
+        }
+    }
+}
+
+private struct FolderHasNoMedia: Error {}
+
+// One file-promise drag. `remaining` counts receivers that have not finished, not files.
+@MainActor private final class PromiseBatch {
+    let destination: URL
+    let pasteboard: NSPasteboard
+    let generation: Int
+    let typeNames: [String]
+    var remaining: Int
+    var imported = 0
+    var lastError: Error?
+    var finished = false
+    init(destination: URL, pasteboard: NSPasteboard, generation: Int, typeNames: [String], remaining: Int) {
+        self.destination = destination; self.pasteboard = pasteboard; self.generation = generation; self.typeNames = typeNames; self.remaining = remaining
+    }
+}
+
+// Progress of one receiver: it finishes after all its files arrive, or after its first error.
+@MainActor private final class PromiseReceiverProgress {
+    let expected: Int
+    var seen = 0
+    var done = false
+    init(expected: Int) { self.expected = expected }
+}
+
+private struct PromiseTimeout: Error {}
+
 @MainActor final class ClipboardStore: ObservableObject {
+    static let downloadsKey = "saveToDownloads"
+    static let accessFailureMessage = "Приложение не дало доступ к файлу. Попробуй «Копировать» или «Сохранить как»."
+    static let folderWithoutMediaMessage = "В папке нет изображений или медиафайлов."
+    static let missingFileMessage = "Файл не найден."
+    nonisolated static let maxFolderFiles = 20
+
     @Published private(set) var history: History
     @Published var errorMessage: String?
     private let pasteboard: NSPasteboard
     private let fileURL: URL
+    private let downloadsDirectory: URL
     private var changeCount: Int
     private var timer: Timer?
     private var canSave = true
     private(set) var importGeneration = 0
     var filesDirectory: URL { fileURL.deletingLastPathComponent().appendingPathComponent("Files", isDirectory: true) }
 
-    init(pasteboard: NSPasteboard = .general, fileURL: URL? = nil) {
+    init(pasteboard: NSPasteboard = .general, fileURL: URL? = nil, downloadsDirectory: URL? = nil) {
         self.pasteboard = pasteboard
         let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("NotchClip", isDirectory: true)
         self.fileURL = fileURL ?? directory.appendingPathComponent("history.json")
+        self.downloadsDirectory = downloadsDirectory ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0]
         self.history = (try? Data(contentsOf: self.fileURL)).flatMap { try? JSONDecoder().decode(History.self, from: $0) } ?? History()
         self.changeCount = pasteboard.changeCount
         if FileManager.default.fileExists(atPath: self.fileURL.path), (try? JSONDecoder().decode(History.self, from: Data(contentsOf: self.fileURL))) == nil {
@@ -64,27 +157,229 @@ enum FileVault {
         changeCount = pasteboard.changeCount
         let ignored = ["org.nspasteboard.TransientType", "org.nspasteboard.ConcealedType", "org.nspasteboard.AutoGeneratedType"]
         guard !(pasteboard.types ?? []).contains(where: { ignored.contains($0.rawValue) }) else { return }
-        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
-            // Capture image data while this pasteboard generation is current. Some
-            // apps offer an unusable file URL alongside an otherwise valid image.
-            let fallback: Clip?
-            if urls.count == 1, let image = NSImage(pasteboard: pasteboard), let tiff = image.tiffRepresentation,
-               let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) {
-                fallback = Clip(kind: .image, data: png)
-            } else { fallback = nil }
-            for url in urls { importFile(url, imageFallback: fallback) }
+        if Self.hasFileItems(pasteboard) {
+            importFiles(from: pasteboard, dropped: false)
         } else if let value = pasteboard.string(forType: .string), !value.isEmpty, let data = value.data(using: .utf8) {
             add(Clip(kind: .text, data: data))
-        } else if let image = NSImage(pasteboard: pasteboard), let tiff = image.tiffRepresentation,
-                  let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) {
-            add(Clip(kind: .image, data: png))
+        } else {
+            importFiles(from: pasteboard, dropped: false)
         }
     }
     func importFileSynchronously(_ url: URL) throws {
         guard canSave else { throw NSError(domain: "NotchClip", code: 2, userInfo: [NSLocalizedDescriptionKey: "Историю нельзя сохранить."]) }
         let clip = try FileVault.copy(url, into: filesDirectory)
-        add(clip)
+        add(clip, capture: true)
     }
+
+    nonisolated static func hasFileItems(_ pasteboard: NSPasteboard) -> Bool {
+        pasteboard.canReadObject(forClasses: [NSFilePromiseReceiver.self], options: nil)
+            || pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+    }
+
+    // The one import chooser for clipboard polling and drag-and-drop. Order: file
+    // promises, readable file URLs (folders contribute their media), then raw image
+    // bytes. Returns false only when the pasteboard offers none of these, so the caller
+    // can fall back to text.
+    @discardableResult
+    func importFiles(from pasteboard: NSPasteboard, dropped: Bool) -> Bool {
+        let promises = pasteboard.readObjects(forClasses: [NSFilePromiseReceiver.self], options: nil) as? [NSFilePromiseReceiver] ?? []
+        let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+        guard !promises.isEmpty || !urls.isEmpty || PasteboardImages.hasImage(pasteboard) else { return false }
+        guard canSave else { errorMessage = "Историю нельзя сохранить."; return true }
+        let generation = importGeneration
+        let typeNames = (pasteboard.types ?? []).map(\.rawValue)
+        if !promises.isEmpty {
+            receivePromises(promises, pasteboard: pasteboard, generation: generation, typeNames: typeNames)
+        } else if !urls.isEmpty {
+            importURLs(urls, pasteboard: pasteboard, generation: generation, dropped: dropped, typeNames: typeNames)
+        } else {
+            // Image-only pasteboard: bytes are copied now and converted off the main actor.
+            addImage(PasteboardImages.rawCandidates(from: pasteboard), generation: generation)
+        }
+        return true
+    }
+
+    // Used only after a file import has failed: copies the image bytes now, converts them off the main actor.
+    private func addImageFallback(from pasteboard: NSPasteboard, generation: Int) -> Bool {
+        let candidates = PasteboardImages.rawCandidates(from: pasteboard)
+        guard !candidates.isEmpty else { return false }
+        addImage(candidates, generation: generation)
+        return true
+    }
+
+    // Decodes to PNG on a background queue, then adds on the main actor through addImported's generation guard.
+    private func addImage(_ candidates: [Data], generation: Int) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let png = candidates.lazy.compactMap(PasteboardImages.png(from:)).first
+            Task { @MainActor in
+                guard let self else { return }
+                if let png {
+                    self.addImported(Clip(kind: .image, data: png), generation: generation)
+                } else if generation == self.importGeneration {
+                    self.errorMessage = Self.accessFailureMessage
+                }
+            }
+        }
+    }
+
+    private func importURLs(_ urls: [URL], pasteboard: NSPasteboard, generation: Int, dropped: Bool, typeNames: [String]) {
+        let root = filesDirectory
+        let downloads = downloadsDirectory
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var clips: [ImportedClip] = []
+            var failures: [ImportFailure] = []
+            var lines = typeNames.map { "type: \($0)" }
+            for url in urls {
+                lines.append("file url: \(url.path) readable=\(FileManager.default.isReadableFile(atPath: url.path))")
+                do {
+                    let fromDownloads = Self.isInside(url, directory: downloads)
+                    clips += try Self.copyFiles(from: url, into: root).map { ImportedClip(clip: $0, fromDownloads: fromDownloads) }
+                } catch {
+                    lines.append("error: \(error.localizedDescription)")
+                    failures.append(ImportFailure(url: url, needsAccess: Self.needsSourcePermission(error, source: url),
+                                                  noMedia: error is FolderHasNoMedia, missing: !FileManager.default.fileExists(atPath: url.path)))
+                }
+            }
+            let result = URLImportResult(clips: clips, failures: failures, diagnostics: lines.joined(separator: "\n"))
+            Task { @MainActor in self?.finishURLImport(result, pasteboard: pasteboard, dropped: dropped, generation: generation) }
+        }
+    }
+
+    // Copies one file, or the media files directly inside a folder (at most maxFolderFiles).
+    nonisolated static func copyFiles(from original: URL, into root: URL) throws -> [Clip] {
+        let scoped = original.startAccessingSecurityScopedResource()
+        defer { if scoped { original.stopAccessingSecurityScopedResource() } }
+        let source = original.resolvingSymlinksInPath()
+        let isFolder = (try? source.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+        guard isFolder else { return [try FileVault.copy(source, into: root)] }
+        let items = try FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: [.isRegularFileKey, .contentTypeKey], options: [.skipsHiddenFiles])
+            .filter(isMedia)
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        guard !items.isEmpty else { throw FolderHasNoMedia() }
+        var clips: [Clip] = []
+        var lastError: Error?
+        for item in items.prefix(maxFolderFiles) {
+            do { clips.append(try FileVault.copy(item, into: root)) } catch { lastError = error }
+        }
+        if clips.isEmpty, let lastError { throw lastError }
+        return clips
+    }
+
+    nonisolated private static func isMedia(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .contentTypeKey]),
+              values.isRegularFile == true, let type = values.contentType else { return false }
+        return type.conforms(to: .image) || type.conforms(to: .audiovisualContent)
+    }
+
+    private func finishURLImport(_ result: URLImportResult, pasteboard: NSPasteboard, dropped: Bool, generation: Int) {
+        if !result.clips.isEmpty {
+            for item in result.clips { addImported(item.clip, generation: generation, fromDownloads: item.fromDownloads) }
+            return
+        }
+        if addImageFallback(from: pasteboard, generation: generation) { return }
+        guard generation == importGeneration else { return }
+        if dropped, result.failures.count == 1, result.failures[0].needsAccess {
+            importDroppedFileWithAccess(result.failures[0].url, generation: generation)
+            return
+        }
+        writeImportDiagnostics(result.diagnostics)
+        if result.failures.allSatisfy(\.noMedia) { errorMessage = Self.folderWithoutMediaMessage }
+        else if result.failures.allSatisfy(\.missing) { errorMessage = Self.missingFileMessage }
+        else { errorMessage = Self.accessFailureMessage }
+    }
+
+    private func receivePromises(_ promises: [NSFilePromiseReceiver], pasteboard: NSPasteboard, generation: Int, typeNames: [String]) {
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("NotchClip-drop-\(UUID().uuidString)", isDirectory: true)
+        do { try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
+        catch { errorMessage = "Не удалось подготовить папку для файла: \(error.localizedDescription)"; return }
+        let batch = PromiseBatch(destination: destination, pasteboard: pasteboard, generation: generation, typeNames: typeNames,
+                                 remaining: promises.count)
+        let root = filesDirectory
+        let queue = OperationQueue()
+        queue.qualityOfService = .userInitiated
+        queue.maxConcurrentOperationCount = 1
+        for promise in promises {
+            let receiver = PromiseReceiverProgress(expected: max(1, promise.fileNames.count))
+            promise.receivePromisedFiles(atDestination: destination, options: [:], operationQueue: queue) { [weak self] url, error in
+                let result: Result<Clip, Error>
+                do {
+                    if let error { throw error }
+                    result = .success(try FileVault.copy(url, into: root))
+                } catch {
+                    result = .failure(error)
+                }
+                Task { @MainActor in self?.promiseFinished(result, receiver: receiver, batch: batch) }
+            }
+        }
+        // A receiver that never calls back must not keep the temporary folder and the import open forever.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            guard let self, !batch.finished else { return }
+            batch.lastError = batch.lastError ?? PromiseTimeout()
+            self.finishPromiseBatch(batch)
+        }
+    }
+
+    private func promiseFinished(_ result: Result<Clip, Error>, receiver: PromiseReceiverProgress, batch: PromiseBatch) {
+        switch result {
+        case .success(let clip):
+            batch.imported += 1
+            receiver.seen += 1
+            addImported(clip, generation: batch.generation)
+        case .failure(let error):
+            batch.lastError = error
+            receiver.seen = receiver.expected
+        }
+        if !receiver.done && receiver.seen >= receiver.expected {
+            receiver.done = true
+            batch.remaining -= 1
+        }
+        if batch.remaining == 0 { finishPromiseBatch(batch) }
+    }
+
+    private func finishPromiseBatch(_ batch: PromiseBatch) {
+        guard !batch.finished else { return }
+        batch.finished = true
+        try? FileManager.default.removeItem(at: batch.destination)
+        guard batch.imported == 0 else { return }
+        if addImageFallback(from: batch.pasteboard, generation: batch.generation) { return }
+        var lines = batch.typeNames.map { "type: \($0)" }
+        lines.append("file promise error: \(batch.lastError?.localizedDescription ?? "none")")
+        writeImportDiagnostics(lines.joined(separator: "\n"))
+        if batch.generation == importGeneration { errorMessage = Self.accessFailureMessage }
+    }
+
+    // True when `url` is inside `directory`. Both paths are resolved and standardized first.
+    nonisolated static func isInside(_ url: URL, directory: URL) -> Bool {
+        let file = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let folder = directory.resolvingSymlinksInPath().standardizedFileURL.path
+        return file.hasPrefix(folder.hasSuffix("/") ? folder : folder + "/")
+    }
+
+    nonisolated static func needsSourcePermission(_ error: Error, source: URL) -> Bool {
+        let nsError = error as NSError
+        guard nsError.domain == NSCocoaErrorDomain,
+              [NSFileReadNoPermissionError, NSFileWriteNoPermissionError].contains(nsError.code) else { return false }
+        // copyItem can report a write error even when the source is protected.
+        // Ask for its parent only when that source itself is not readable; a
+        // failure writing our own vault cannot be fixed by that permission.
+        return !FileManager.default.isReadableFile(atPath: source.path)
+    }
+
+    // Overwrites a small text report with the pasteboard type names and file-URL
+    // readability. It never contains clip contents.
+    private func writeImportDiagnostics(_ text: String) {
+        let directory = fileURL.deletingLastPathComponent()
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                try text.write(to: directory.appendingPathComponent("last-import-failure.txt"), atomically: true, encoding: .utf8)
+            } catch {
+                NSLog("NotchClip: could not write import diagnostics: %@", error.localizedDescription)
+            }
+        }
+    }
+
     nonisolated static func shouldRetryDroppedFileAccess(_ error: Error, usedCachedBookmark: Bool, sourceReadable: Bool) -> Bool {
         let error = error as NSError
         return usedCachedBookmark && !sourceReadable && error.domain == NSCocoaErrorDomain &&
@@ -124,6 +419,7 @@ enum FileVault {
         let accessing = folder.startAccessingSecurityScopedResource()
         let sourceInFolder = folder.appendingPathComponent(source.lastPathComponent)
         let root = filesDirectory
+        let fromDownloads = Self.isInside(source, directory: downloadsDirectory)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             defer { if accessing { folder.stopAccessingSecurityScopedResource() } }
             do {
@@ -132,7 +428,7 @@ enum FileVault {
                 Task { @MainActor in
                     guard let self else { return }
                     if let bookmark { UserDefaults.standard.set(bookmark, forKey: key) }
-                    self.addImported(clip, generation: generation)
+                    self.addImported(clip, generation: generation, fromDownloads: fromDownloads)
                 }
             } catch {
                 let retry = Self.shouldRetryDroppedFileAccess(error, usedCachedBookmark: usedCachedBookmark,
@@ -146,30 +442,14 @@ enum FileVault {
             }
         }
     }
-    func importFile(_ url: URL, imageFallback: Clip? = nil) {
-        guard canSave else { errorMessage = "Историю нельзя сохранить."; return }
-        let root = filesDirectory
-        let generation = importGeneration
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                let clip = try FileVault.copy(url, into: root)
-                Task { @MainActor in self?.addImported(clip, generation: generation) }
-            } catch {
-                Task { @MainActor in
-                    guard let self else { return }
-                    if let imageFallback { self.addImported(imageFallback, generation: generation) }
-                    else if generation == self.importGeneration { self.errorMessage = "Не удалось добавить файл: \(error.localizedDescription)" }
-                }
-            }
-        }
-    }
-    func addImported(_ clip: Clip, generation: Int) {
+    // `fromDownloads`: the original file already lives in Downloads, so no second copy is saved there.
+    func addImported(_ clip: Clip, generation: Int, fromDownloads: Bool = false) {
         guard generation == importGeneration, canSave else {
             if let url = managedFileURL(for: clip) { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
             if !canSave { errorMessage = "Историю нельзя сохранить." }
             return
         }
-        add(clip)
+        add(clip, capture: true, copyToDownloads: !fromDownloads)
     }
     func managedFileURL(for clip: Clip) -> URL? { FileVault.url(for: clip, root: filesDirectory) }
     @discardableResult func select(_ clip: Clip) -> Bool {
@@ -216,13 +496,49 @@ enum FileVault {
     func remove(_ id: UUID) { let previous = history.clips; history.remove(id); persistAndClean(previous) }
     func clear() { importGeneration += 1; let previous = history.clips; history.clear(); persistAndClean(previous) }
     func clearAll() { importGeneration += 1; let previous = history.clips; history.clearAll(); persistAndClean(previous) }
-    private func add(_ clip: Clip) { let previous = history.clips; history.add(clip); persistAndClean(previous) }
-    private func persistAndClean(_ old: [Clip]) {
-        guard save() else { return }
+
+    // `capture` marks a newly imported or copied item. Only those are also saved to
+    // Downloads; re-selecting an existing item, relaunching, and loading history never are.
+    // A Downloads copy is saved only for a NEW clip: a deduplicated image is already in history and already saved.
+    private func add(_ clip: Clip, capture: Bool = false, copyToDownloads: Bool = true) {
+        let previous = history.clips
+        let inserted = history.add(clip)
+        guard persistAndClean(previous), capture, inserted, copyToDownloads else { return }
+        let enabled = UserDefaults.standard.object(forKey: Self.downloadsKey) as? Bool ?? true
+        if enabled { saveCopyToDownloads(clip) }
+    }
+
+    private func saveCopyToDownloads(_ clip: Clip) {
+        let directory = downloadsDirectory
+        switch clip.kind {
+        case .text:
+            return
+        case .image:
+            let data = clip.data
+            DownloadsWriter.save(named: "NotchClip \(Self.stampFormatter.string(from: Date())).png", in: directory) { target in
+                try data.write(to: target, options: .withoutOverwriting)
+            }
+        case .file:
+            guard let source = managedFileURL(for: clip) else { return }
+            DownloadsWriter.save(named: source.lastPathComponent, in: directory) { target in
+                try FileManager.default.copyItem(at: source, to: target)
+            }
+        }
+    }
+    private static let stampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        return formatter
+    }()
+
+    @discardableResult private func persistAndClean(_ old: [Clip]) -> Bool {
+        guard save() else { return false }
         let retained = Set(history.clips.map(\.id))
         for item in old where item.kind == .file && !retained.contains(item.id) {
             if let url = managedFileURL(for: item) { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         }
+        return true
     }
     @discardableResult private func save() -> Bool {
         guard canSave else { return false }
@@ -233,4 +549,24 @@ enum FileVault {
             errorMessage = nil; return true
         } catch { errorMessage = "Не удалось сохранить историю: \(error.localizedDescription)"; return false }
     }
+}
+
+// Per-file failure from a folder or file-URL import, kept until the main actor decides.
+private struct ImportFailure {
+    let url: URL
+    let needsAccess: Bool
+    let noMedia: Bool
+    let missing: Bool
+}
+
+// A clip from a file import, and whether its original file already lives in Downloads.
+private struct ImportedClip {
+    let clip: Clip
+    let fromDownloads: Bool
+}
+
+private struct URLImportResult {
+    let clips: [ImportedClip]
+    let failures: [ImportFailure]
+    let diagnostics: String
 }

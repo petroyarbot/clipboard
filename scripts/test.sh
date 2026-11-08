@@ -9,3 +9,7 @@ swiftc -parse-as-library Sources/NotchClip/History.swift Sources/NotchClip/Clipb
 "$work_dir/clipboard-tests"
 swiftc -D NOTCHCLIP_TESTING -parse-as-library Sources/NotchClip/*.swift Tests/DropIntegration/main.swift -o "$work_dir/drop-tests"
 "$work_dir/drop-tests"
+swiftc Sources/NotchClip/PanelTab.swift Tests/PanelTabs/main.swift -o "$work_dir/panel-tab-tests"
+"$work_dir/panel-tab-tests"
+./scripts/test-agents.sh
+./scripts/test-focus-timer.sh

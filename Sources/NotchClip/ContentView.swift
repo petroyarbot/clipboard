@@ -31,6 +31,8 @@ struct ContentView: View {
     @AppStorage("animationBounce") var animationBounce = 0.12
     @AppStorage("hoverOpenDelay") var hoverOpenDelay = 0.0
     @AppStorage("hoverCloseDelay") var hoverCloseDelay = 0.30
+    @AppStorage(ClipboardStore.downloadsKey) var saveToDownloads = true
+    @AppStorage(PanelTab.storageKey) private var tabRaw = PanelTab.clipboard.rawValue
     @StateObject private var state = ViewState()
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
@@ -42,6 +44,10 @@ struct ContentView: View {
             let queryMatches = state.query.isEmpty || value.localizedCaseInsensitiveContains(state.query)
             return typeMatches && queryMatches
         }
+    }
+    var tab: PanelTab { PanelTab.restore(tabRaw) }
+    var tabBinding: Binding<PanelTab> {
+        Binding(get: { PanelTab.restore(tabRaw) }, set: { tabRaw = $0.rawValue })
     }
     var body: some View {
         let width = delegate.expanded ? panelWidth : Double(delegate.collapsedWidth)
@@ -65,11 +71,15 @@ struct ContentView: View {
     var content: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: "clipboard").font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                Text(state.showingSettings ? "Настройки" : state.previewID != nil ? "Просмотр" : "Буфер обмена")
-                    .font(.system(size: 15, weight: .semibold)).fixedSize()
-                if !state.showingSettings && state.previewID == nil {
+                if state.showingSettings || state.previewID != nil {
+                    Image(systemName: "clipboard").font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                    Text(state.showingSettings ? "Настройки" : "Просмотр")
+                        .font(.system(size: 15, weight: .semibold)).fixedSize()
+                } else {
+                    PanelTabBar(selection: tabBinding, agents: delegate.agents)
+                }
+                if !state.showingSettings && state.previewID == nil && tab == .clipboard {
                     HStack(spacing: 7) {
                         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                         TextField("Поиск в истории", text: $state.query).textFieldStyle(.plain)
@@ -96,40 +106,52 @@ struct ContentView: View {
             } else if let id = state.previewID, let clip = store.history.clips.first(where: { $0.id == id }) {
                 preview(clip)
             } else {
-                HStack(spacing: 6) {
-                    ViewThatFits(in: .horizontal) {
-                        filterBar(showIcons: true).fixedSize(horizontal: true, vertical: false)
-                        filterBar(showIcons: false).fixedSize(horizontal: true, vertical: false)
-                        ScrollView(.horizontal, showsIndicators: false) { filterBar(showIcons: false).fixedSize(horizontal: true, vertical: false) }
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                    Button { state.confirmHistoryClear = true } label: {
-                        Label("Очистить", systemImage: "trash").font(.system(size: 12)).fixedSize()
-                    }.buttonStyle(.plain).foregroundStyle(.secondary).help("Очистить историю")
-                }.fixedSize(horizontal: false, vertical: true)
-                .confirmationDialog("Очистить историю?", isPresented: $state.confirmHistoryClear, titleVisibility: .visible) {
-                    Button("Очистить незакреплённые", role: .destructive) { store.clear() }
-                    Button("Очистить всё, включая закреплённые", role: .destructive) { store.clearAll() }
-                    Button("Отмена", role: .cancel) { }
-                } message: {
-                    Text("Сохранённые копии файлов из удалённых записей тоже будут удалены. Текущий системный буфер не изменится.")
-                }
-                .onChange(of: state.confirmHistoryClear) { showing in delegate.editing = showing || state.isEditing }
-                if filtered.isEmpty {
-                    Spacer()
-                    Text(state.query.isEmpty ? "Скопируй текст или изображение" : "Ничего не найдено")
-                        .foregroundStyle(.secondary).font(.system(size: 13)).frame(maxWidth: .infinity)
-                    Spacer()
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(filtered) { clip in row(clip) }
-                        }
+                switch tab {
+                case .clipboard: history
+                case .focus:
+                    ScrollView(showsIndicators: false) {
+                        FocusView(timer: delegate.focusTimer).padding(.top, 6).padding(.bottom, 4)
                     }
+                case .agents: AgentsView(usage: delegate.usage, agents: delegate.agents)
                 }
             }
         }
         .overlay(alignment: .bottom) {
             if delegate.dropTargeted { Text("Отпусти, чтобы сохранить").font(.system(size: 13, weight: .medium)).padding(10).background(.ultraThinMaterial, in: Capsule()) }
+        }
+    }
+    var history: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                ViewThatFits(in: .horizontal) {
+                    filterBar(showIcons: true).fixedSize(horizontal: true, vertical: false)
+                    filterBar(showIcons: false).fixedSize(horizontal: true, vertical: false)
+                    ScrollView(.horizontal, showsIndicators: false) { filterBar(showIcons: false).fixedSize(horizontal: true, vertical: false) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                Button { state.confirmHistoryClear = true } label: {
+                    Label("Очистить", systemImage: "trash").font(.system(size: 12)).fixedSize()
+                }.buttonStyle(.plain).foregroundStyle(.secondary).help("Очистить историю")
+            }.fixedSize(horizontal: false, vertical: true)
+            .confirmationDialog("Очистить историю?", isPresented: $state.confirmHistoryClear, titleVisibility: .visible) {
+                Button("Очистить незакреплённые", role: .destructive) { store.clear() }
+                Button("Очистить всё, включая закреплённые", role: .destructive) { store.clearAll() }
+                Button("Отмена", role: .cancel) { }
+            } message: {
+                Text("Сохранённые копии файлов из удалённых записей тоже будут удалены. Текущий системный буфер не изменится.")
+            }
+            .onChange(of: state.confirmHistoryClear) { showing in delegate.editing = showing || state.isEditing }
+            if filtered.isEmpty {
+                Spacer()
+                Text(state.query.isEmpty ? "Скопируй текст или изображение" : "Ничего не найдено")
+                    .foregroundStyle(.secondary).font(.system(size: 13)).frame(maxWidth: .infinity)
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(filtered) { clip in row(clip) }
+                    }
+                }
+            }
         }
     }
     var settings: some View {
@@ -140,6 +162,7 @@ struct ContentView: View {
                     Text("⌘ ⇧ V").tag(0); Text("⌘ ⇧ C").tag(1); Text("⌘ ⇧ Space").tag(2)
                 }.onChange(of: shortcut) { _ in delegate.registerShortcut() }
                 launchAtLoginRow
+                Toggle("Сохранять фото и файлы в Загрузки", isOn: $saveToDownloads)
                 Text("Размер панели").font(.system(size: 13, weight: .semibold))
                 HStack(spacing: 7) {
                     sizePreset("Компактный", width: 480, height: 400)

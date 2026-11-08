@@ -1,45 +1,32 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 // Handles the native drag pasteboard, including files that are created only
-// after the drop. It never downloads a URL from the network.
+// after the drop. It never downloads a URL from the network. Files and images
+// go through the same chooser as clipboard polling (ClipboardStore.importFiles).
 @MainActor final class DropImporter {
     private let store: ClipboardStore
     init(store: ClipboardStore) { self.store = store }
 
-    nonisolated static func needsSourcePermission(_ error: Error, source: URL) -> Bool {
-        let nsError = error as NSError
-        guard nsError.domain == NSCocoaErrorDomain,
-              [NSFileReadNoPermissionError, NSFileWriteNoPermissionError].contains(nsError.code) else { return false }
-        // copyItem can report a write error even when the source is protected.
-        // Ask for its parent only when that source itself is not readable; a
-        // failure writing our own vault cannot be fixed by that permission.
-        return !FileManager.default.isReadableFile(atPath: source.path)
-    }
+    // Every type a drag source may offer for something we can import.
+    static let dragTypes: [NSPasteboard.PasteboardType] = {
+        let names = NSFilePromiseReceiver.readableDraggedTypes + [
+            "public.file-url", "public.url", "public.image", "public.png", "public.jpeg", "public.heic",
+            "org.webmproject.webp", "public.tiff", "com.apple.pasteboard.promised-file-url", "NSPromiseContentsPboardType",
+        ]
+        var unique: [String] = []
+        for name in names where !unique.contains(name) { unique.append(name) }
+        return (unique + [NSPasteboard.PasteboardType.string.rawValue]).map { NSPasteboard.PasteboardType($0) }
+    }()
 
     func canAccept(_ pasteboard: NSPasteboard) -> Bool {
         pasteboard.canReadObject(forClasses: [NSFilePromiseReceiver.self, NSURL.self, NSImage.self], options: nil)
-            || pasteboard.availableType(from: [.string]) != nil
+            || pasteboard.availableType(from: Self.dragTypes) != nil
     }
 
     @discardableResult func importPasteboard(_ pasteboard: NSPasteboard) -> Bool {
+        if store.importFiles(from: pasteboard, dropped: true) { return true }
         let generation = store.importGeneration
-        let root = store.filesDirectory
-        if let promises = pasteboard.readObjects(forClasses: [NSFilePromiseReceiver.self], options: nil) as? [NSFilePromiseReceiver], !promises.isEmpty {
-            receive(promises, into: root, generation: generation)
-            return true
-        }
-        if let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
-            for url in urls { importFile(url, into: root, generation: generation) }
-            return true
-        }
-        let hasImageBytes = (pasteboard.types ?? []).contains { UTType($0.rawValue)?.conforms(to: .image) == true }
-        if hasImageBytes, let image = NSImage(pasteboard: pasteboard), let tiff = image.tiffRepresentation,
-           let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) {
-            store.addImported(Clip(kind: .image, data: png), generation: generation)
-            return true
-        }
         let rawURL = (pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL])?.first
         let rawText = pasteboard.string(forType: .string)
         let text = rawURL.flatMap { ["https", "http"].contains($0.scheme?.lowercased() ?? "") ? $0.absoluteString : nil } ?? rawText
@@ -50,56 +37,6 @@ import UniformTypeIdentifiers
             store.errorMessage = "Сохранена ссылка. Чтобы сохранить сам файл, сначала скачай его."
         }
         return true
-    }
-
-    private func importFile(_ source: URL, into root: URL, generation: Int) {
-        // Keep any grant supplied by AppKit active until copying finishes.
-        let scoped = source.startAccessingSecurityScopedResource()
-        DispatchQueue.global(qos: .userInitiated).async { [weak store] in
-            defer { if scoped { source.stopAccessingSecurityScopedResource() } }
-            do {
-                let clip = try FileVault.copy(source, into: root)
-                Task { @MainActor in store?.addImported(clip, generation: generation) }
-            } catch {
-                let needsAccess = DropImporter.needsSourcePermission(error, source: source)
-                Task { @MainActor in
-                    guard let store, generation == store.importGeneration else { return }
-                    if needsAccess {
-                        store.importDroppedFileWithAccess(source, generation: generation)
-                    } else {
-                        store.errorMessage = "Не удалось добавить файл: \(error.localizedDescription)"
-                    }
-                }
-            }
-        }
-    }
-
-    private func receive(_ promises: [NSFilePromiseReceiver], into root: URL, generation: Int) {
-        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("NotchClip-drop-\(UUID().uuidString)", isDirectory: true)
-        do { try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
-        catch { store.errorMessage = "Не удалось подготовить папку для файла: \(error.localizedDescription)"; return }
-        let queue = OperationQueue()
-        queue.qualityOfService = .userInitiated
-        queue.maxConcurrentOperationCount = 1
-        var remaining = promises.reduce(0) { $0 + max(1, $1.fileNames.count) }
-        for promise in promises {
-          promise.receivePromisedFiles(atDestination: destination, options: [:], operationQueue: queue) { [weak store] url, error in
-            defer {
-                remaining -= 1
-                if remaining == 0 { try? FileManager.default.removeItem(at: destination) }
-            }
-            do {
-                if let error { throw error }
-                let clip = try FileVault.copy(url, into: root)
-                Task { @MainActor in store?.addImported(clip, generation: generation) }
-            } catch {
-                Task { @MainActor in
-                    guard let store, generation == store.importGeneration else { return }
-                    store.errorMessage = "Не удалось получить файл: \(error.localizedDescription)"
-                }
-            }
-          }
-        }
     }
 }
 
@@ -112,8 +49,7 @@ import UniformTypeIdentifiers
         self.importer = DropImporter(store: store)
         self.delegate = delegate
         super.init(rootView: rootView)
-        let promiseTypes = NSFilePromiseReceiver.readableDraggedTypes.map { NSPasteboard.PasteboardType($0) }
-        registerForDraggedTypes(promiseTypes + [.fileURL, .URL, .tiff, .png, .string])
+        registerForDraggedTypes(DropImporter.dragTypes)
     }
     required init(rootView: AnyView) { fatalError("init(rootView:) is not supported") }
     @objc required dynamic init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
