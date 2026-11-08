@@ -32,15 +32,20 @@ struct History: Codable {
     var limit = 100
     var ordered: [Clip] { clips.filter(\.isPinned) + clips.filter { !$0.isPinned } }
 
-    mutating func add(_ clip: Clip) {
-        guard !clip.data.isEmpty else { return }
+    /// Returns true only when a new clip was inserted; false for empty data and for a duplicate that was moved to the top.
+    @discardableResult mutating func add(_ clip: Clip) -> Bool {
+        guard !clip.data.isEmpty else { return false }
         if let existing = clips.first(where: { $0.kind == clip.kind && $0.data == clip.data }) {
             clips.removeAll { $0.id == existing.id }
             var item = existing
             item.createdAt = Date()
             clips.insert(item, at: 0)
-        } else { clips.insert(clip, at: 0) }
+            trim()
+            return false
+        }
+        clips.insert(clip, at: 0)
         trim()
+        return true
     }
     mutating func togglePin(_ id: UUID) {
         guard let index = clips.firstIndex(where: { $0.id == id }) else { return }
@@ -53,6 +58,7 @@ struct History: Codable {
     }
     mutating func remove(_ id: UUID) { clips.removeAll { $0.id == id } }
     mutating func clear() { clips.removeAll { !$0.isPinned } }
+    mutating func clearAll() { clips.removeAll() }
     private mutating func trim() {
         var unpinned = 0
         clips.removeAll { item in

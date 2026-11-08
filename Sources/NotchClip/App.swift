@@ -1,11 +1,15 @@
 import AppKit
 import SwiftUI
 import Carbon
+import Combine
+import ServiceManagement
 
+#if !NOTCHCLIP_TESTING
 @main struct NotchClipApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
     var body: some Scene { Settings { EmptyView() } }
 }
+#endif
 
 final class ClipPanel: NSPanel {
     var onEscape: (() -> Void)?
@@ -17,9 +21,17 @@ final class ClipPanel: NSPanel {
 }
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
-    let store = ClipboardStore()
+    let store: ClipboardStore
+    override init() { self.store = ClipboardStore(); super.init() }
+    init(store: ClipboardStore) { self.store = store; super.init() }
     @Published var expanded = false
     @Published var editing = false
+    @Published var dropTargeted = false
+    /// One timer for the whole app, so it keeps running while the panel is closed.
+    let focusTimer = FocusTimer()
+    let usage = UsageMonitor()
+    let agents = AgentMonitor()
+    private var statusCancellables = Set<AnyCancellable>()
     var panel: ClipPanel!
     var status: NSStatusItem!
     var hotKey: EventHotKeyRef?
@@ -50,7 +62,7 @@ final class ClipPanel: NSPanel {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = false
         panel.onEscape = { [weak self] in self?.close() }
-        let hosting = NSHostingView(rootView: ContentView(store: store, delegate: self).ignoresSafeArea())
+        let hosting = DropHostingView(rootView: AnyView(ContentView(store: store, delegate: self).ignoresSafeArea()), store: store, delegate: self)
         hosting.sizingOptions = []
         hosting.frame = NSRect(origin: .zero, size: size)
         hosting.autoresizingMask = [.width, .height]
@@ -66,10 +78,45 @@ final class ClipPanel: NSPanel {
             return noErr
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &eventHandler)
         registerShortcut(); store.start()
+        usage.start(); agents.start()
+        observeStatusItem()
+        setupLoginItem()
         NotificationCenter.default.addObserver(self, selector: #selector(menuDidOpen), name: NSMenu.didBeginTrackingNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(menuDidClose), name: NSMenu.didEndTrackingNotification, object: nil)
         let timer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in Task { @MainActor in self?.checkHover() } }
         RunLoop.main.add(timer, forMode: .common); mouseTimer = timer
+    }
+    /// Menu bar text: the running focus timer and the count of tasks waiting for the user.
+    func observeStatusItem() {
+        Publishers.CombineLatest3(focusTimer.$state, focusTimer.$lastTick, agents.$tasks)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _, _ in self?.updateStatusTitle() }
+            .store(in: &statusCancellables)
+        updateStatusTitle()
+    }
+    func updateStatusTitle() {
+        guard let button = status?.button else { return }
+        var parts: [String] = []
+        if focusTimer.state == .running { parts.append(focusTimer.compactText) }
+        let needs = agents.needsActionCount
+        if needs > 0 { parts.append("●\(needs)") }
+        button.title = parts.isEmpty ? "" : " " + parts.joined(separator: " ")
+        button.imagePosition = parts.isEmpty ? .imageOnly : .imageLeading
+    }
+    func setupLoginItem() {
+        if CommandLine.arguments.contains("--enable-login-item") {
+            do { try SMAppService.mainApp.register() }
+            catch { NSLog("NotchClip login item error: %@", error.localizedDescription) }
+        }
+        let text: String
+        switch SMAppService.mainApp.status {
+        case .enabled: text = "enabled"
+        case .notRegistered: text = "notRegistered"
+        case .requiresApproval: text = "requiresApproval"
+        case .notFound: text = "notFound"
+        @unknown default: text = "unknown"
+        }
+        NSLog("NotchClip login item status: %@", text)
     }
     func registerShortcut() {
         if let hotKey { UnregisterEventHotKey(hotKey); self.hotKey = nil }
@@ -116,7 +163,8 @@ final class ClipPanel: NSPanel {
         placePanel(on: screen)
         expanded = false
         panel.contentView?.layoutSubtreeIfNeeded()
-        panel.makeKeyAndOrderFront(nil)
+        if held { panel.makeKeyAndOrderFront(nil) }
+        else { panel.orderFrontRegardless() }
         let token = UUID(); openToken = token
         // Give AppKit one frame to present the collapsed shape before expanding it.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { [weak self] in
@@ -148,5 +196,6 @@ final class ClipPanel: NSPanel {
         NotificationCenter.default.removeObserver(self)
         if let hotKey { UnregisterEventHotKey(hotKey) }
         if let eventHandler { RemoveEventHandler(eventHandler) }
+        usage.stop(); agents.stop()
     }
 }

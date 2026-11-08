@@ -1,11 +1,13 @@
 import SwiftUI
 import AppKit
+import ServiceManagement
 import UniformTypeIdentifiers
 
 final class ViewState: ObservableObject {
     @Published var query = ""
     @Published var showingSettings = false
     @Published var confirmClear = false
+    @Published var confirmHistoryClear = false
     @Published var filter = 0
     @Published var editingID: UUID?
     @Published var editText = ""
@@ -14,7 +16,8 @@ final class ViewState: ObservableObject {
     @Published var widthDraft = ""
     @Published var heightDraft = ""
     @Published var settingsError: String?
-    @Published var dropTargeted = false
+    @Published var loginStatus: SMAppService.Status = .notRegistered
+    @Published var loginError: String?
 }
 
 struct ContentView: View {
@@ -28,17 +31,23 @@ struct ContentView: View {
     @AppStorage("animationBounce") var animationBounce = 0.12
     @AppStorage("hoverOpenDelay") var hoverOpenDelay = 0.0
     @AppStorage("hoverCloseDelay") var hoverCloseDelay = 0.30
+    @AppStorage(ClipboardStore.downloadsKey) var saveToDownloads = true
+    @AppStorage(PanelTab.storageKey) private var tabRaw = PanelTab.clipboard.rawValue
     @StateObject private var state = ViewState()
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var filtered: [Clip] {
         store.history.ordered.filter { clip in
             let isLink = link(for: clip) != nil
-            let typeMatches = state.filter == 0 || (state.filter == 1 && clip.kind == .text && !isLink) || (state.filter == 2 && clip.kind == .image) || (state.filter == 3 && clip.kind == .file) || (state.filter == 4 && isLink)
+            let typeMatches = state.filter == 0 || (state.filter == 1 && clip.kind == .text && !isLink) || (state.filter == 2 && (clip.kind == .image || isImageFile(clip))) || (state.filter == 3 && clip.kind == .file) || (state.filter == 4 && isLink)
             let value = clip.kind == .file ? fileName(for: clip) : (String(data: clip.data, encoding: .utf8) ?? "")
             let queryMatches = state.query.isEmpty || value.localizedCaseInsensitiveContains(state.query)
             return typeMatches && queryMatches
         }
+    }
+    var tab: PanelTab { PanelTab.restore(tabRaw) }
+    var tabBinding: Binding<PanelTab> {
+        Binding(get: { PanelTab.restore(tabRaw) }, set: { tabRaw = $0.rawValue })
     }
     var body: some View {
         let width = delegate.expanded ? panelWidth : Double(delegate.collapsedWidth)
@@ -62,11 +71,15 @@ struct ContentView: View {
     var content: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Image(systemName: "clipboard").font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                Text(state.showingSettings ? "Настройки" : state.previewID != nil ? "Просмотр" : "Буфер обмена")
-                    .font(.system(size: 15, weight: .semibold)).fixedSize()
-                if !state.showingSettings && state.previewID == nil {
+                if state.showingSettings || state.previewID != nil {
+                    Image(systemName: "clipboard").font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                    Text(state.showingSettings ? "Настройки" : "Просмотр")
+                        .font(.system(size: 15, weight: .semibold)).fixedSize()
+                } else {
+                    PanelTabBar(selection: tabBinding, agents: delegate.agents)
+                }
+                if !state.showingSettings && state.previewID == nil && tab == .clipboard {
                     HStack(spacing: 7) {
                         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                         TextField("Поиск в истории", text: $state.query).textFieldStyle(.plain)
@@ -93,28 +106,53 @@ struct ContentView: View {
             } else if let id = state.previewID, let clip = store.history.clips.first(where: { $0.id == id }) {
                 preview(clip)
             } else {
-                ViewThatFits(in: .horizontal) {
-                    filterBar(showIcons: true)
-                    filterBar(showIcons: false)
-                }.fixedSize(horizontal: false, vertical: true)
-                if filtered.isEmpty {
-                    Spacer()
-                    Text(state.query.isEmpty ? "Скопируй текст или изображение" : "Ничего не найдено")
-                        .foregroundStyle(.secondary).font(.system(size: 13)).frame(maxWidth: .infinity)
-                    Spacer()
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(filtered) { clip in row(clip) }
-                        }
+                switch tab {
+                case .clipboard: history
+                case .focus:
+                    ScrollView(showsIndicators: false) {
+                        FocusView(timer: delegate.focusTimer).padding(.top, 6).padding(.bottom, 4)
                     }
+                case .agents: AgentsView(usage: delegate.usage, agents: delegate.agents)
                 }
             }
         }
         .overlay(alignment: .bottom) {
-            if state.dropTargeted { Text("Отпусти, чтобы сохранить копию файла").font(.system(size: 13, weight: .medium)).padding(10).background(.ultraThinMaterial, in: Capsule()) }
+            if delegate.dropTargeted { Text("Отпусти, чтобы сохранить").font(.system(size: 13, weight: .medium)).padding(10).background(.ultraThinMaterial, in: Capsule()) }
         }
-        .onDrop(of: [UTType.fileURL], isTargeted: $state.dropTargeted, perform: handleDrop)
+    }
+    var history: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                ViewThatFits(in: .horizontal) {
+                    filterBar(showIcons: true).fixedSize(horizontal: true, vertical: false)
+                    filterBar(showIcons: false).fixedSize(horizontal: true, vertical: false)
+                    ScrollView(.horizontal, showsIndicators: false) { filterBar(showIcons: false).fixedSize(horizontal: true, vertical: false) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                Button { state.confirmHistoryClear = true } label: {
+                    Label("Очистить", systemImage: "trash").font(.system(size: 12)).fixedSize()
+                }.buttonStyle(.plain).foregroundStyle(.secondary).help("Очистить историю")
+            }.fixedSize(horizontal: false, vertical: true)
+            .confirmationDialog("Очистить историю?", isPresented: $state.confirmHistoryClear, titleVisibility: .visible) {
+                Button("Очистить незакреплённые", role: .destructive) { store.clear() }
+                Button("Очистить всё, включая закреплённые", role: .destructive) { store.clearAll() }
+                Button("Отмена", role: .cancel) { }
+            } message: {
+                Text("Сохранённые копии файлов из удалённых записей тоже будут удалены. Текущий системный буфер не изменится.")
+            }
+            .onChange(of: state.confirmHistoryClear) { showing in delegate.editing = showing || state.isEditing }
+            if filtered.isEmpty {
+                Spacer()
+                Text(state.query.isEmpty ? "Скопируй текст или изображение" : "Ничего не найдено")
+                    .foregroundStyle(.secondary).font(.system(size: 13)).frame(maxWidth: .infinity)
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(filtered) { clip in row(clip) }
+                    }
+                }
+            }
+        }
     }
     var settings: some View {
         ScrollView {
@@ -123,6 +161,8 @@ struct ContentView: View {
                 Picker("Горячая клавиша", selection: $shortcut) {
                     Text("⌘ ⇧ V").tag(0); Text("⌘ ⇧ C").tag(1); Text("⌘ ⇧ Space").tag(2)
                 }.onChange(of: shortcut) { _ in delegate.registerShortcut() }
+                launchAtLoginRow
+                Toggle("Сохранять фото и файлы в Загрузки", isOn: $saveToDownloads)
                 Text("Размер панели").font(.system(size: 13, weight: .semibold))
                 HStack(spacing: 7) {
                     sizePreset("Компактный", width: 480, height: 400)
@@ -149,15 +189,37 @@ struct ContentView: View {
                 Button("Выйти из NotchClip") { NSApp.terminate(nil) }
             }.padding(.vertical, 8).padding(.horizontal, 4)
         }
+        .onAppear { refreshLoginStatus() }
+    }
+    var launchAtLoginRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("Запускать при входе", isOn: Binding(get: { state.loginStatus == .enabled }, set: setLaunchAtLogin))
+            if state.loginStatus == .requiresApproval {
+                HStack(spacing: 6) {
+                    Text("Разреши в Системных настройках → Основные → Объекты входа").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Button("Открыть") { SMAppService.openSystemSettingsLoginItems() }.controlSize(.small)
+                }
+            }
+            if let error = state.loginError { Text(error).font(.caption).foregroundStyle(.orange) }
+        }
+    }
+    func refreshLoginStatus() { state.loginStatus = SMAppService.mainApp.status }
+    func setLaunchAtLogin(_ on: Bool) {
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            state.loginError = nil
+        } catch {
+            state.loginError = "Не удалось изменить: \(error.localizedDescription)"
+        }
+        refreshLoginStatus()
     }
     func filterBar(showIcons: Bool) -> some View {
         HStack(spacing: 5) {
             filterButton("Все", icon: nil, value: 0)
             filterButton("Текст", icon: showIcons ? "text.alignleft" : nil, value: 1)
-            filterButton("Изображения", icon: showIcons ? "photo" : nil, value: 2)
+            filterButton(showIcons ? "Изображения" : "Фото", icon: showIcons ? "photo" : nil, value: 2)
             filterButton("Файлы", icon: showIcons ? "doc" : nil, value: 3)
             filterButton("Ссылки", icon: showIcons ? "link" : nil, value: 4)
-            Spacer(minLength: 0)
         }
     }
     func filterButton(_ title: String, icon: String?, value: Int) -> some View {
@@ -168,7 +230,7 @@ struct ContentView: View {
             }.font(.system(size: 12, weight: state.filter == value ? .semibold : .regular))
                 .padding(.horizontal, 8).frame(height: 27)
                 .background(state.filter == value ? Color.white.opacity(0.22) : Color.white.opacity(0.06), in: Capsule())
-        }.buttonStyle(.plain).accessibilityLabel(title).accessibilityAddTraits(state.filter == value ? .isSelected : [])
+        }.buttonStyle(.plain).accessibilityLabel(value == 2 ? "Изображения" : title).accessibilityAddTraits(state.filter == value ? .isSelected : [])
     }
 
     func sizePreset(_ title: String, width: Double, height: Double) -> some View {
@@ -188,6 +250,15 @@ struct ContentView: View {
     }
     func link(for clip: Clip) -> URL? { clip.linkURL }
     func fileName(for clip: Clip) -> String { (try? JSONDecoder().decode(StoredFile.self, from: clip.data))?.name ?? "Файл" }
+    func isImageFile(_ clip: Clip) -> Bool {
+        guard clip.kind == .file, let url = store.managedFileURL(for: clip), let type = UTType(filenameExtension: url.pathExtension) else { return false }
+        return type.conforms(to: .image)
+    }
+    func image(for clip: Clip) -> NSImage? {
+        if clip.kind == .image { return NSImage(data: clip.data) }
+        guard isImageFile(clip), let url = store.managedFileURL(for: clip) else { return nil }
+        return NSImage(contentsOf: url)
+    }
     func closePreview() { state.previewID = nil; state.isEditing = false; delegate.editing = false }
     func openPreview(_ clip: Clip, edit: Bool = false) {
         state.previewID = clip.id; state.isEditing = edit; state.editText = String(data: clip.data, encoding: .utf8) ?? ""; delegate.editing = edit
@@ -214,32 +285,12 @@ struct ContentView: View {
                     ScrollView { Text(String(data: clip.data, encoding: .utf8) ?? "").font(.system(size: 14)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(10) }
                         .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
                 }
-            } else if clip.kind == .image, let image = NSImage(data: clip.data) {
+            } else if let image = image(for: clip) {
                 GeometryReader { geometry in Image(nsImage: image).resizable().scaledToFit().frame(width: geometry.size.width, height: geometry.size.height) }
             } else {
                 Spacer(); Label(fileName(for: clip), systemImage: "doc").frame(maxWidth: .infinity); Spacer()
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-    }
-    func handleDrop(_ providers: [NSItemProvider]) -> Bool {
-        let root = store.filesDirectory
-        for provider in providers {
-            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { value, error in
-                let url: URL?
-                if let data = value as? Data { url = URL(dataRepresentation: data, relativeTo: nil) }
-                else if let itemURL = value as? URL { url = itemURL }
-                else { url = nil }
-                guard let url else {
-                    Task { @MainActor in store.errorMessage = "Не удалось получить перетаскиваемый файл." }
-                    return
-                }
-                do {
-                    let clip = try FileVault.copy(url, into: root)
-                    Task { @MainActor in store.addImported(clip) }
-                } catch { Task { @MainActor in store.errorMessage = "Не удалось добавить файл: \(error.localizedDescription)" } }
-            }
-        }
-        return !providers.isEmpty
     }
     @ViewBuilder func row(_ clip: Clip) -> some View {
         if clip.kind == .file {
@@ -254,9 +305,9 @@ struct ContentView: View {
             HStack(spacing: 9) {
                 Button { delegate.select(clip) } label: {
                     HStack(spacing: 9) {
-                        if clip.kind == .image, let image = NSImage(data: clip.data) {
+                        if let image = image(for: clip) {
                             Image(nsImage: image).resizable().scaledToFill().frame(width: 44, height: 30).clipped().clipShape(RoundedRectangle(cornerRadius: 4))
-                            Text("Изображение").lineLimit(1)
+                            Text(clip.kind == .file ? fileName(for: clip) : "Изображение").lineLimit(1)
                         } else {
                             Image(systemName: clip.kind == .file ? "doc" : link(for: clip) != nil ? "link" : "doc.text")
                                 .font(.system(size: 13)).foregroundStyle(.secondary).frame(width: 28, height: 28)
