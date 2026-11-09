@@ -43,7 +43,7 @@ struct ContentView: View {
         .overlay(alignment: .top) {
             content.padding(.horizontal, 22).padding(.top, max(delegate.collapsedHeight + 8, 36)).padding(.bottom, 18)
                 .frame(width: panelWidth, height: panelHeight, alignment: .top)
-                .modifier(IslandReveal(visible: delegate.expanded))
+                .modifier(IslandReveal(visible: delegate.expanded, token: delegate.revealToken))
         }
         .clipShape(shape)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

@@ -36,6 +36,8 @@ final class FocusTimer: ObservableObject {
     private static let finishEpsilon: TimeInterval = 0.05
     private static let minMinutes = 1
     private static let maxMinutes = 180
+    /// Максимум фокуса с колёсиков: 23:59:59.
+    static let maxFocusSeconds = 23 * 3600 + 59 * 60 + 59
 
     /// Обновляется раз в секунду, пока таймер идёт; заставляет SwiftUI перерисовываться.
     @Published private(set) var lastTick: Date
@@ -46,6 +48,8 @@ final class FocusTimer: ObservableObject {
     /// Сколько фокус-сессий сделано в текущем цикле (0..<sessionsPerCycle).
     @Published private(set) var focusInCycle: Int = 0
     @Published private(set) var focusMinutes: Int
+    /// Длительность фокуса в секундах (колёсики или настройка в минутах).
+    @Published private(set) var focusSeconds: Int
     @Published private(set) var shortBreakMinutes: Int
     @Published private(set) var longBreakMinutes: Int
 
@@ -62,6 +66,7 @@ final class FocusTimer: ObservableObject {
 
     private enum Key {
         static let focusMinutes = "focusTimer.focusMinutes"
+        static let focusSeconds = "focusTimer.focusSeconds"
         static let shortBreakMinutes = "focusTimer.shortBreakMinutes"
         static let longBreakMinutes = "focusTimer.longBreakMinutes"
         static let cycle = "focusTimer.cycle"
@@ -80,7 +85,9 @@ final class FocusTimer: ObservableObject {
         self.playSound = playSound
         self.notify = notify
         self.lastTick = clock()
-        self.focusMinutes = FocusTimer.storedMinutes(defaults, Key.focusMinutes, fallback: 25)
+        let storedFocusMinutes = FocusTimer.storedMinutes(defaults, Key.focusMinutes, fallback: 25)
+        self.focusMinutes = storedFocusMinutes
+        self.focusSeconds = FocusTimer.storedSeconds(defaults, Key.focusSeconds, fallback: storedFocusMinutes * 60)
         self.shortBreakMinutes = FocusTimer.storedMinutes(defaults, Key.shortBreakMinutes, fallback: 5)
         self.longBreakMinutes = FocusTimer.storedMinutes(defaults, Key.longBreakMinutes, fallback: 15)
         self.focusInCycle = min(max(defaults.integer(forKey: Key.cycle), 0), FocusTimer.sessionsPerCycle - 1)
@@ -90,14 +97,15 @@ final class FocusTimer: ObservableObject {
 
     func minutes(for phase: FocusPhase) -> Int {
         switch phase {
-        case .focus: return focusMinutes
+        case .focus: return focusSeconds / 60
         case .shortBreak: return shortBreakMinutes
         case .longBreak: return longBreakMinutes
         }
     }
 
     func duration(of phase: FocusPhase) -> TimeInterval {
-        TimeInterval(minutes(for: phase) * 60)
+        if phase == .focus { return TimeInterval(focusSeconds) }
+        return TimeInterval(minutes(for: phase) * 60)
     }
 
     /// Оставшееся время в секундах.
@@ -120,10 +128,17 @@ final class FocusTimer: ObservableObject {
         return min(max(1 - remaining / total, 0), 1)
     }
 
-    /// "18:42" — мм:сс, округление вверх, чтобы в начале было "25:00".
+    /// "18:42" — мм:сс, от часа — "1:02:05" (h:mm:ss). Округление вверх, чтобы в начале было "25:00".
     var compactText: String {
-        let total = max(0, Int(ceil(remaining - 0.01)))
-        return "\(total / 60):" + String(format: "%02d", total % 60)
+        Self.clockText(max(0, Int(ceil(remaining - 0.01))))
+    }
+
+    static func clockText(_ total: Int) -> String {
+        let hours = total / 3600
+        let minutes = total % 3600 / 60
+        let seconds = total % 60
+        if hours > 0 { return String(format: "%d:%02d:%02d", hours, minutes, seconds) }
+        return String(format: "%d:%02d", minutes, seconds)
     }
 
     var phaseTitle: String {
@@ -156,9 +171,16 @@ final class FocusTimer: ObservableObject {
         loadDurations()
     }
 
+    /// Длительность фокуса в секундах (колёсики). Только в idle; сохраняется при старте.
+    func setFocusSeconds(_ value: Int) {
+        guard state == .idle else { return }
+        focusSeconds = min(max(value, 0), Self.maxFocusSeconds)
+    }
+
     private func loadDurations() {
         durationsPending = false
         focusMinutes = FocusTimer.storedMinutes(defaults, Key.focusMinutes, fallback: 25)
+        focusSeconds = FocusTimer.storedSeconds(defaults, Key.focusSeconds, fallback: focusMinutes * 60)
         shortBreakMinutes = FocusTimer.storedMinutes(defaults, Key.shortBreakMinutes, fallback: 5)
         longBreakMinutes = FocusTimer.storedMinutes(defaults, Key.longBreakMinutes, fallback: 15)
     }
@@ -170,7 +192,9 @@ final class FocusTimer: ObservableObject {
         switch phase {
         case .focus:
             focusMinutes = clamped
+            focusSeconds = clamped * 60
             defaults.set(clamped, forKey: Key.focusMinutes)
+            defaults.set(focusSeconds, forKey: Key.focusSeconds)
         case .shortBreak:
             shortBreakMinutes = clamped
             defaults.set(clamped, forKey: Key.shortBreakMinutes)
@@ -184,6 +208,7 @@ final class FocusTimer: ObservableObject {
 
     func start() {
         guard state == .idle else { return }
+        if phase == .focus { defaults.set(focusSeconds, forKey: Key.focusSeconds) }
         endDate = clock().addingTimeInterval(duration(of: phase))
         pausedRemaining = nil
         state = .running
@@ -329,6 +354,11 @@ final class FocusTimer: ObservableObject {
     private static func storedMinutes(_ defaults: UserDefaults, _ key: String, fallback: Int) -> Int {
         let value = defaults.integer(forKey: key)
         return value > 0 ? value : fallback
+    }
+
+    private static func storedSeconds(_ defaults: UserDefaults, _ key: String, fallback: Int) -> Int {
+        let value = defaults.integer(forKey: key)
+        return (1...maxFocusSeconds).contains(value) ? value : fallback
     }
 
     // MARK: - Побочные эффекты по умолчанию

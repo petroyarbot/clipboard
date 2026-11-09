@@ -10,7 +10,7 @@ enum SettingsMapping {
         "animationDuration", "animationBounce",
         "hoverOpenDelay", "hoverCloseDelay",
         "focusTimer.focusMinutes", "focusTimer.shortBreakMinutes", "focusTimer.longBreakMinutes",
-        "focusTimer.soundEnabled",
+        "focusTimer.soundEnabled", "focusTimer.focusSeconds",
         "liveActivityFocus", "liveActivityAgents",
     ]
 

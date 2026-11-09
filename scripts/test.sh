@@ -15,4 +15,5 @@ swiftc Sources/NotchClip/SettingsMapping.swift Tests/SettingsMapping/main.swift 
 "$work_dir/settings-mapping-tests"
 ./scripts/test-agents.sh
 ./scripts/test-focus-timer.sh
+./scripts/test-time-wheel.sh
 ./scripts/test-island.sh

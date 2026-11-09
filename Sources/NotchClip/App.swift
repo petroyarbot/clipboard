@@ -29,6 +29,8 @@ final class ClipPanel: NSPanel {
     override init() { self.store = ClipboardStore(); super.init() }
     init(store: ClipboardStore) { self.store = store; super.init() }
     @Published var expanded = false
+    /// Растёт при каждом открытии панели: содержимое проявляется заново.
+    @Published var revealToken = 0
     @Published var editing = false
     @Published var dropTargeted = false
     /// One timer for the whole app, so it keeps running while the panel is closed.
@@ -252,6 +254,7 @@ final class ClipPanel: NSPanel {
     func show(on screen: NSScreen?, held: Bool) {
         guard let screen else { return }
         hideWork?.cancel()
+        revealToken &+= 1
         liveActivity.setPanelOpen(true)
         behavior.didOpen(held: held)
         if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {

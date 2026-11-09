@@ -290,7 +290,7 @@ final class LiveActivityController {
             return
         }
 
-        guard let layout = IslandState.layout(for: next, notchWidth: metrics.notchWidth, notchHeight: metrics.notchHeight) else { return }
+        guard let layout = IslandState.layout(for: next, notchWidth: metrics.notchWidth, notchHeight: metrics.notchHeight, wings: compactWings(for: next)) else { return }
         hideWork?.cancel()
         let window = ensurePanel()
 
@@ -298,8 +298,8 @@ final class LiveActivityController {
             // Показ: сначала форма размером с вырез, на следующем кадре она вырастает до цели.
             model.presentation = .idle
             model.layout = IslandLayout(width: metrics.notchWidth, height: 0, bottomRadius: 0, contentTop: 0)
-            window.ignoresMouseEvents = false
-            window.setFrame(windowFrame(width: layout.width, height: layout.height, metrics: metrics), display: false)
+            window.ignoresMouseEvents = Self.isCompact(next)
+            window.setFrame(windowFrame(width: layout.width, height: layout.height, metrics: metrics, slack: true), display: false)
             window.orderFrontRegardless()
             onVisibilityChanged?()
             let token = UUID()
@@ -342,11 +342,25 @@ final class LiveActivityController {
     /// Пока окно больше компактной формы, оно пропускает клики: меню-бар рядом с вырезом остаётся доступным.
     private func growWindow(for layout: IslandLayout, next: IslandPresentation, metrics: IslandMetrics, window: IslandPanel) {
         let current = window.frame
-        let height = max(current.height - metrics.topOffset, layout.height)
-        let width = max(current.width, layout.width)
-        window.setFrame(windowFrame(width: width, height: height, metrics: metrics), display: false)
+        // Запас окна уже может быть в текущем кадре: вычитаем его, чтобы он не накапливался.
+        let slack = IslandState.overshootSlack
+        let height = max(current.height - metrics.topOffset - slack, layout.height)
+        let width = max(current.width - slack, layout.width)
         let oversized = width > layout.width || height > layout.height
+        window.setFrame(windowFrame(width: width, height: height, metrics: metrics, slack: true), display: false)
         window.ignoresMouseEvents = oversized && Self.isCompact(next)
+    }
+
+    /// Что стоит в крыльях для презентации: по этому описанию считается ширина островка.
+    private func compactWings(for presentation: IslandPresentation) -> CompactWings {
+        CompactWings(
+            showsTimer: presentation == .compactTimer || presentation == .compactBoth,
+            showsAgent: (presentation == .compactAgent || presentation == .compactBoth) && model.agent != nil,
+            clock: timer.compactText,
+            phaseLabel: timer.phase == .focus ? "Фокус" : "Перерыв",
+            agentProject: model.agent?.project ?? "",
+            agentCount: model.agent?.count ?? 0
+        )
     }
 
     private static func isCompact(_ presentation: IslandPresentation) -> Bool {
@@ -434,12 +448,14 @@ final class LiveActivityController {
         return window
     }
 
-    private func windowFrame(width: CGFloat, height: CGFloat, metrics: IslandMetrics) -> NSRect {
-        NSRect(
-            x: metrics.frame.midX - width / 2,
-            y: metrics.frame.maxY - height - metrics.topOffset,
-            width: width,
-            height: height + metrics.topOffset
+    /// Окно сверху всегда у края экрана. `slack` добавляет запас на пружинный перелёт формы (5 pt по бокам, 10 pt снизу).
+    private func windowFrame(width: CGFloat, height: CGFloat, metrics: IslandMetrics, slack: Bool = false) -> NSRect {
+        let extra = slack ? IslandState.overshootSlack : 0
+        return NSRect(
+            x: metrics.frame.midX - (width + extra) / 2,
+            y: metrics.frame.maxY - height - metrics.topOffset - extra,
+            width: width + extra,
+            height: height + metrics.topOffset + extra
         )
     }
 

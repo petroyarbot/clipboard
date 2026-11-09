@@ -103,8 +103,28 @@ skipped.quietStarted()
 check(skipped.queuedAgentDone == 3 && skipped.releasedAgentDone == 0, "skip then focus again keeps the count of three")
 
 // 5. Геометрия.
-let compact = IslandState.layout(for: .compactBoth, notchWidth: 200, notchHeight: 32)
-check(compact?.width == 200 + 2 * IslandState.wingWidth && compact?.height == 32 && compact?.bottomRadius == 12, "compact island is notch plus two wings, notch high")
+let bothWings = CompactWings(showsTimer: true, showsAgent: true, clock: "59:59", agentProject: "NotchClip", agentCount: 2)
+let compact = IslandState.layout(for: .compactBoth, notchWidth: 200, notchHeight: 32, wings: bothWings)
+check(compact?.width == 200 + 2 * (compact?.wing ?? 0) && compact?.height == 32 && compact?.bottomRadius == 12, "compact island is notch plus two equal wings, notch high")
+check((compact?.wing ?? 0) >= IslandState.minimumWingWidth, "compact wing is at least the minimum width")
+
+// Ширина крыла по времени: m:ss и h:mm:ss, без дёрганья внутри одного формата.
+func timerWing(_ clock: String) -> CGFloat {
+    IslandState.compactWingWidth(CompactWings(showsTimer: true, clock: clock))
+}
+func clockWidth(_ text: String) -> CGFloat {
+    IslandState.textWidth(text, size: 13, weight: .semibold, digits: true)
+}
+let w444 = timerWing("4:44")
+let w5959 = timerWing("59:59")
+let w235959 = timerWing("23:59:59")
+check(w444 == w5959, "m:ss wing width is the same for 4:44 and 59:59 (no jitter as the timer counts)")
+check(w235959 > w5959, "h:mm:ss wing is wider than m:ss wing")
+check(w444 >= IslandState.minimumWingWidth, "4:44 wing keeps the minimum width")
+check(w5959 >= clockWidth("59:59") + IslandState.wingEdgePadding + IslandState.wingNotchGap, "59:59 fits inside the wing with edge padding and notch gap")
+check(w235959 >= clockWidth("23:59:59") + IslandState.wingEdgePadding + IslandState.wingNotchGap, "23:59:59 fits inside the wing with edge padding and notch gap")
+check(timerWing("1:05:00") == w235959, "1:05:00 uses the h:mm:ss reserved width")
+check(IslandState.compactWingWidth(CompactWings(showsTimer: true, showsAgent: true, clock: "59:59", agentCount: 12)) >= IslandState.minimumWingWidth, "timer plus agent wing keeps the minimum width")
 let mini = IslandState.layout(for: .miniPlayer, notchWidth: 200, notchHeight: 32)
 check(mini?.width == 440 && mini?.height == 150 && mini?.bottomRadius == 30 && mini?.contentTop == 32, "mini player is 440x150 below the notch")
 let bannerLayout = IslandState.layout(for: .banner, notchWidth: 200, notchHeight: 32)

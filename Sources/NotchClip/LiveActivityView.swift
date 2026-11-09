@@ -39,6 +39,9 @@ struct LiveIslandView: View {
         model.presentation == .compactTimer || model.presentation == .compactAgent || model.presentation == .compactBoth
     }
 
+    /// "4:44" до часа, "1:02:05" от часа (форматирует `FocusTimer.compactText`).
+    private var clock: String { timer.compactText }
+
     private var showsTimer: Bool {
         model.presentation == .compactTimer || model.presentation == .compactBoth
     }
@@ -52,12 +55,12 @@ struct LiveIslandView: View {
     private var compact: some View {
         HStack(spacing: 0) {
             leftWing
-                .padding(.leading, 9)
-                .frame(width: IslandState.wingWidth, alignment: .leading)
+                .padding(.leading, IslandState.wingEdgePadding)
+                .frame(width: model.layout.wing, alignment: .leading)
             Color.clear.frame(width: model.notchWidth)
             rightWing
-                .padding(.trailing, 9)
-                .frame(width: IslandState.wingWidth, alignment: .trailing)
+                .padding(.trailing, IslandState.wingEdgePadding)
+                .frame(width: model.layout.wing, alignment: .trailing)
         }
         .frame(height: model.notchHeight)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -109,9 +112,11 @@ struct LiveIslandView: View {
                     .font(.system(size: size * 0.5))
                     .foregroundStyle(Self.accent.opacity(0.7))
             }
-            Text(timer.compactText)
+            Text(clock)
                 .font(.system(size: size, weight: .semibold))
                 .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize()
                 .foregroundStyle(Self.accent.opacity(paused ? 0.5 : 1))
         }
     }
@@ -144,7 +149,7 @@ struct LiveIslandView: View {
         HStack(spacing: 18) {
             ring(size: 72, line: 6)
             VStack(alignment: .leading, spacing: 2) {
-                Text(timer.compactText)
+                Text(clock)
                     .font(.system(size: 38, weight: .light))
                     .monospacedDigit()
                     .opacity(timer.state == .paused ? 0.55 : 1)

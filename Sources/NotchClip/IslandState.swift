@@ -1,3 +1,4 @@
+import AppKit // ширина текста считается теми же системными шрифтами, что рисует островок
 import Foundation
 
 /// Что показывает закрытая "чёлка". Выбирается в `IslandState.presentation`.
@@ -36,6 +37,19 @@ struct IslandLayout: Equatable {
     let height: CGFloat
     let bottomRadius: CGFloat
     let contentTop: CGFloat
+    /// Ширина одного крыла в компактном режиме (слева и справа одинаковая, чтобы содержимое было симметричным).
+    var wing: CGFloat = IslandState.minimumWingWidth
+}
+
+/// Что стоит в компактных крыльях. По этому описанию считается ширина, поэтому окно и текст не расходятся.
+struct CompactWings: Equatable {
+    var showsTimer = false
+    var showsAgent = false
+    /// Текущее время ("4:44", "1:05:00"). Из строки берётся формат, а не сами цифры.
+    var clock = "0:00"
+    var phaseLabel = "Фокус"
+    var agentProject = ""
+    var agentCount = 0
 }
 
 /// Ключи настроек Live Activity (UI настроек читает их же).
@@ -51,7 +65,14 @@ enum IslandSettings {
 /// Чистый редьюсер островка: без AppKit и без таймеров. Время передаётся числом (секунды).
 struct IslandState: Equatable {
     static let bannerDuration: TimeInterval = 4
-    static let wingWidth: CGFloat = 68
+    /// Минимальная ширина крыла; реальная считается по содержимому (`compactWingWidth`).
+    static let minimumWingWidth: CGFloat = 68
+    /// Отступ содержимого от внешнего края крыла: выше верхнего скругления/фаски формы (фаска ~11 pt при высоте 32).
+    static let wingEdgePadding: CGFloat = 12
+    /// Минимальный зазор между содержимым и вырезом камеры.
+    static let wingNotchGap: CGFloat = 8
+    /// Запас окна на пружинный перелёт формы при росте (по 5 pt с каждой стороны, снизу 10).
+    static let overshootSlack: CGFloat = 10
     static let miniSize = CGSize(width: 440, height: 150)
     static let bannerSize = CGSize(width: 460, height: 104)
     static let minimumNotchHeight: CGFloat = 32
@@ -119,18 +140,67 @@ struct IslandState: Equatable {
         }
     }
 
-    static func layout(for presentation: IslandPresentation, notchWidth: CGFloat, notchHeight: CGFloat) -> IslandLayout? {
+    static func layout(for presentation: IslandPresentation, notchWidth: CGFloat, notchHeight: CGFloat, wings: CompactWings = CompactWings()) -> IslandLayout? {
         switch presentation {
         case .idle:
             return nil
         case .compactTimer, .compactAgent, .compactBoth:
-            return IslandLayout(width: notchWidth + 2 * wingWidth, height: notchHeight, bottomRadius: 12, contentTop: 0)
+            let wing = compactWingWidth(wings)
+            return IslandLayout(width: notchWidth + 2 * wing, height: notchHeight, bottomRadius: 12, contentTop: 0, wing: wing)
         case .miniPlayer:
             return IslandLayout(width: miniSize.width, height: miniSize.height, bottomRadius: 30, contentTop: notchHeight)
         case .banner:
             return IslandLayout(width: bannerSize.width, height: bannerSize.height, bottomRadius: 22, contentTop: notchHeight)
         }
     }
+
+    // MARK: - Время и ширина крыльев
+
+    /// Самая широкая строка того же формата: ширина крыла не дёргается, пока время идёт.
+    static func reservedClock(_ text: String) -> String {
+        text.filter { $0 == ":" }.count >= 2 ? "99:59:59" : "59:59"
+    }
+
+    /// Ширина текста в точках. `digits` — моноширинные цифры, как `monospacedDigit()` в SwiftUI.
+    static func textWidth(_ text: String, size: CGFloat, weight: NSFont.Weight, digits: Bool = false) -> CGFloat {
+        let font = digits
+            ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
+            : NSFont.systemFont(ofSize: size, weight: weight)
+        return ceil((text as NSString).size(withAttributes: [.font: font]).width)
+    }
+
+    /// Ширина времени с запасом под значок паузы (он стоит слева от цифр и не должен менять ширину крыла).
+    static func clockWidth(_ clock: String, size: CGFloat) -> CGFloat {
+        let config = NSImage.SymbolConfiguration(pointSize: size * 0.5, weight: .regular)
+        let pause = NSImage(systemSymbolName: "pause.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)?.size.width ?? size * 0.5
+        return textWidth(reservedClock(clock), size: size, weight: .semibold, digits: true) + 3 + ceil(pause)
+    }
+
+    /// Ширина одного крыла: самое широкое содержимое + отступ от края + зазор до выреза. Не меньше `minimumWingWidth`.
+    static func compactWingWidth(_ wings: CompactWings) -> CGFloat {
+        // Слева: кольцо 15 + 5 + (время при агенте 11 pt | подпись фазы 10 pt) или значок агента 22 + 5 + проект (до 96).
+        var left: CGFloat = 0
+        if wings.showsTimer {
+            let tail = wings.showsAgent ? clockWidth(wings.clock, size: 11) : textWidth(wings.phaseLabel, size: 10, weight: .semibold)
+            left = 15 + 5 + tail
+        } else if wings.showsAgent {
+            left = badgeWidth + 5 + min(textWidth(wings.agentProject, size: 10, weight: .medium), 96)
+        }
+        // Справа: значок агента + точка 6 + 4 + число/"ждёт" (10 pt), либо одно время 13 pt.
+        var right: CGFloat = 0
+        if wings.showsAgent {
+            let count = wings.showsTimer ? "\(wings.agentCount)" : "ждёт"
+            right = (wings.showsTimer ? badgeWidth + 4 : 0) + 6 + 4 + textWidth("\(count)", size: 10, weight: .semibold)
+        } else if wings.showsTimer {
+            right = clockWidth(wings.clock, size: 13)
+        }
+        let content = max(left, right)
+        return max(minimumWingWidth, content + wingEdgePadding + wingNotchGap)
+    }
+
+    /// Значок "CL"/"CX": текст 8.5 pt + по 4 pt слева и справа.
+    private static var badgeWidth: CGFloat { textWidth("CL", size: 8.5, weight: .bold) + 8 }
 
     // MARK: - Тексты
 

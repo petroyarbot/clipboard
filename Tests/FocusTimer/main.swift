@@ -219,7 +219,7 @@ func runTests() -> Int {
         timer.tick()
         check(timer.phase == .shortBreak && timer.focusMinutes == 10, "reset durations apply at the next phase boundary")
         timer.reset()
-        check(timer.state == .idle && timer.duration(of: .focus) == 600, "reset while idle reloads durations at once")
+        check(timer.state == .idle && timer.focusMinutes == 10, "reset while idle reloads durations at once")
 
         let cancelled = UserDefaults(suiteName: "focus-reload-cancel-\(UUID().uuidString)")!
         let cancelTimer = makeTimer(clock, cancelled, Recorder())
@@ -228,6 +228,42 @@ func runTests() -> Int {
         cancelTimer.reloadDurations()
         cancelTimer.reset()
         check(cancelTimer.focusMinutes == 12, "cancelling a running phase applies pending durations")
+    }
+
+    // 10. Колёсики: секундная точность, формат h:mm:ss от часа.
+    do {
+        let picked = UserDefaults(suiteName: "focus-seconds-\(UUID().uuidString)")!
+        let clock = FakeClock(noon)
+        let recorder = Recorder()
+        let timer = makeTimer(clock, picked, recorder)
+        timer.setFocusSeconds(90)
+        check(timer.remaining == 90 && timer.compactText == "1:30", "picked 90 seconds shows 1:30 when idle")
+        timer.setFocusSeconds(3725)
+        check(timer.compactText == "1:02:05", "hour-plus duration shows h:mm:ss")
+        check(FocusTimer.clockText(3599) == "59:59", "clockText just under an hour is m:ss")
+        timer.start()
+        check(timer.remaining == 3725 && timer.compactText == "1:02:05", "running hour-plus countdown")
+        clock.advance(3600)
+        check(timer.compactText == "2:05", "after an hour the countdown drops back to m:ss")
+        timer.setFocusSeconds(86_000)
+        check(timer.focusSeconds == 3725, "picker is ignored while running")
+        timer.reset()
+        timer.setFocusSeconds(999_999)
+        check(timer.focusSeconds == FocusTimer.maxFocusSeconds, "focus clamps to 23:59:59")
+        timer.setFocusSeconds(0)
+        check(timer.focusSeconds == 0, "zero is kept so the UI can disable Start")
+        timer.setFocusSeconds(45)
+        timer.start()
+        let reopened = makeTimer(clock, picked, Recorder())
+        check(reopened.focusSeconds == 45, "started focus length persists")
+        timer.reset()
+        finishPhase(timer, clock)
+        check(timer.phase == .shortBreak && timer.remaining == 300, "picked focus ends into a short break")
+        finishPhase(timer, clock)
+        check(timer.phase == .focus && timer.remaining == 45, "focus returns with the picked length")
+        timer.reset()
+        timer.setMinutes(20, for: .focus)
+        check(timer.focusSeconds == 1200 && timer.remaining == 1200, "settings minutes sync the focus length")
     }
 
     return failures

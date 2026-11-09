@@ -47,6 +47,7 @@ let reset = SettingsMapping.resettableKeys
 check(Set(reset).count == reset.count, "reset keys are unique")
 check(reset.contains("hoverEnabled") && reset.contains("panelWidth") && reset.contains("saveToDownloads"), "reset covers general, panel and buffer settings")
 check(reset.contains("focusTimer.soundEnabled") && reset.contains("focusTimer.focusMinutes"), "reset covers focus settings")
+check(reset.contains("focusTimer.focusSeconds"), "reset covers focus seconds")
 check(reset.contains("liveActivityFocus") && reset.contains("liveActivityAgents"), "reset covers live activity toggles")
 check(reset.allSatisfy { !SettingsMapping.preservedKeys.contains($0) }, "reset never touches preserved keys")
 check(!reset.contains("focusTimer.count") && !reset.contains("focusTimer.countDay") && !reset.contains("focusTimer.cycle"), "focus statistics are kept")
