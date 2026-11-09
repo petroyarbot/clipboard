@@ -5,8 +5,8 @@ SPM_ARGS=()
 if [[ "${NOTCHCLIP_NO_SPM_SANDBOX:-0}" == 1 ]]; then
   SPM_ARGS+=(--disable-sandbox -debug-info-format none --scratch-path "${NOTCHCLIP_SPM_SCRATCH:-/tmp/claude-501/nc-app-build}")
 fi
-swift build "${SPM_ARGS[@]}" -c release --arch arm64
-BIN="$(swift build "${SPM_ARGS[@]}" -c release --arch arm64 --show-bin-path)/NotchClip"
+swift build ${SPM_ARGS[@]+"${SPM_ARGS[@]}"} -c release --arch arm64
+BIN="$(swift build ${SPM_ARGS[@]+"${SPM_ARGS[@]}"} -c release --arch arm64 --show-bin-path)/NotchClip"
 APP="${1:-$PWD/build/NotchClip.app}"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/NotchClip"
