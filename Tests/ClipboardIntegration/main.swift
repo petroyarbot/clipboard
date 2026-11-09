@@ -131,7 +131,8 @@ import Foundation
   precondition(store.history.clips.contains { !beforeLocked.contains($0.id) && $0.kind == .image }, "unreadable file should fall back to image bytes")
   precondition(store.errorMessage == nil, "unreadable file with image bytes must not report an error: \(store.errorMessage ?? "")")
   // A folder URL imports the media files directly inside it, not the folder itself.
-  let photos = root.appendingPathComponent("Photos", isDirectory: true)
+  // Under Desktop, a user folder: its files keep the file behavior (app storage would import them as images).
+  let photos = root.appendingPathComponent("Desktop/Photos", isDirectory: true)
   try FileManager.default.createDirectory(at: photos, withIntermediateDirectories: true)
   let tinyPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAE0lEQVR4nGP4z8DwHwMDw38GhoYfAAB7CBBl1VdfNgAAAABJRU5ErkJggg==")!
   try tinyPNG.write(to: photos.appendingPathComponent("b-second.png"))
@@ -156,6 +157,48 @@ import Foundation
   waitUntil { store.history.clips.contains { !beforeWebP.contains($0.id) && $0.kind == .image } }
   guard let webpClip = store.history.clips.first(where: { !beforeWebP.contains($0.id) && $0.kind == .image }) else { fatalError("webp bytes were not imported") }
   precondition(Array(webpClip.data.prefix(4)) == [0x89, 0x50, 0x4E, 0x47], "webp clip must be stored as PNG")
+  // Images from app storage become image clips, with or without an extension; user folders keep file clips with their extension.
+  func jpeg(_ color: NSColor) -> Data {
+      let image = NSImage(size: NSSize(width: 2, height: 2)); image.lockFocus(); color.setFill(); NSRect(x: 0, y: 0, width: 2, height: 2).fill(); image.unlockFocus()
+      return NSBitmapImageRep(data: image.tiffRepresentation!)!.representation(using: .jpeg, properties: [:])!
+  }
+  func importOne(_ url: URL, into target: ClipboardStore) -> Clip? {
+      let before = Set(target.history.clips.map(\.id))
+      board.clearContents(); precondition(board.writeObjects([url as NSURL]))
+      target.poll()
+      waitUntil { target.history.clips.contains { !before.contains($0.id) } }
+      return target.history.clips.first { !before.contains($0.id) }
+  }
+  UserDefaults.standard.removeObject(forKey: ClipboardStore.downloadsKey)
+  let telegramDir = root.appendingPathComponent("Library/Group Containers/telegram", isDirectory: true)
+  try FileManager.default.createDirectory(at: telegramDir, withIntermediateDirectories: true)
+  let appPhoto = telegramDir.appendingPathComponent("photo-a.jpg")
+  try jpeg(.purple).write(to: appPhoto)
+  precondition(importOne(appPhoto, into: store)?.kind == .image, "JPEG in app storage must become an image clip")
+  let appNoExtension = telegramDir.appendingPathComponent("telegram-cloud-photo-size-2-1-y")
+  try jpeg(.orange).write(to: appNoExtension)
+  precondition(importOne(appNoExtension, into: store)?.kind == .image, "extensionless JPEG in app storage must become an image clip")
+  let desktop = root.appendingPathComponent("Desktop", isDirectory: true)
+  try FileManager.default.createDirectory(at: desktop, withIntermediateDirectories: true)
+  let desktopPhoto = desktop.appendingPathComponent("photo.jpg")
+  try jpeg(.cyan).write(to: desktopPhoto)
+  let desktopClip = importOne(desktopPhoto, into: store)
+  precondition(desktopClip?.kind == .file, "JPEG on Desktop must stay a file clip")
+  precondition(desktopClip.flatMap { store.managedFileURL(for: $0)?.lastPathComponent } == "photo.jpg", "Desktop file clip must keep .jpg")
+  let desktopNoExtension = desktop.appendingPathComponent("scan-without-extension")
+  try jpeg(.yellow).write(to: desktopNoExtension)
+  let extDownloads = root.appendingPathComponent("DownloadsExt", isDirectory: true)
+  let extStore = ClipboardStore(pasteboard: board, fileURL: root.appendingPathComponent("ext-history.json"), downloadsDirectory: extDownloads)
+  let noExtClip = importOne(desktopNoExtension, into: extStore)
+  precondition(noExtClip?.kind == .file, "extensionless JPEG on Desktop must stay a file clip")
+  precondition(noExtClip.flatMap { extStore.managedFileURL(for: $0)?.lastPathComponent } == "scan-without-extension.jpg", "stored name must gain the sniffed .jpg")
+  waitUntil { FileManager.default.fileExists(atPath: extDownloads.appendingPathComponent("scan-without-extension.jpg").path) }
+  precondition(FileManager.default.fileExists(atPath: extDownloads.appendingPathComponent("scan-without-extension.jpg").path), "Downloads copy must keep the extension")
+  let appDownloadStore = ClipboardStore(pasteboard: board, fileURL: root.appendingPathComponent("app-history.json"), downloadsDirectory: extDownloads)
+  let appDownloadClip = importOne(appNoExtension, into: appDownloadStore)
+  precondition(appDownloadClip?.kind == .image, "app-storage JPEG must become an image clip in a fresh history")
+  waitUntil { ((try? FileManager.default.contentsOfDirectory(atPath: extDownloads.path)) ?? []).contains { $0.hasPrefix("NotchClip ") && $0.hasSuffix(".png") } }
+  precondition(((try? FileManager.default.contentsOfDirectory(atPath: extDownloads.path)) ?? []).contains { $0.hasPrefix("NotchClip ") && $0.hasSuffix(".png") }, "image clip copy must use the NotchClip PNG name")
   // Downloads: unique names, no re-save on re-select, and nothing when the setting is off.
   let downloadsTest = root.appendingPathComponent("DownloadsTest", isDirectory: true)
   let dlStore = ClipboardStore(pasteboard: board, fileURL: root.appendingPathComponent("dl-history.json"), downloadsDirectory: downloadsTest)

@@ -43,7 +43,6 @@ struct ContentView: View {
         .overlay(alignment: .top) {
             content.padding(.horizontal, 22).padding(.top, max(delegate.collapsedHeight + 8, 36)).padding(.bottom, 18)
                 .frame(width: panelWidth, height: panelHeight, alignment: .top)
-                .modifier(IslandReveal(visible: delegate.expanded, token: delegate.revealToken))
         }
         .clipShape(shape)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -83,7 +82,13 @@ struct ContentView: View {
                 }.buttonStyle(.plain).accessibilityLabel("Закрыть").help("Закрыть")
             }
             if let error = store.errorMessage {
-                Text(error).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(error).font(.caption).foregroundStyle(.orange)
+                    if error == ClipboardStore.fullDiskAccessMessage {
+                        Button("Открыть настройки") { NSWorkspace.shared.open(ClipboardStore.fullDiskAccessURL) }
+                            .buttonStyle(.link).font(.caption)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }
             if let id = state.previewID, let clip = store.history.clips.first(where: { $0.id == id }) {
                 preview(clip)

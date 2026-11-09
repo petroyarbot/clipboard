@@ -8,7 +8,64 @@ struct StoredFile: Codable {
     let name: String
 }
 
+// Recognises image files for import: by extension when it names a known type, otherwise by magic bytes.
+enum ImageFiles {
+    // Folders the user keeps files in. A file here is always imported as a file, never as an image clip.
+    static let userFolderMarkers = ["/Desktop/", "/Documents/", "/Downloads/"]
+    // App containers, caches and temporary folders, where apps such as Telegram keep media.
+    static let appStorageMarkers = ["/Library/Group Containers/", "/Library/Containers/", "/Library/Caches/", "/private/var/folders/"]
+
+    static func isInAppStorage(_ url: URL) -> Bool {
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        if userFolderMarkers.contains(where: { path.contains($0) }) { return false }
+        let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().standardizedFileURL.path
+        return appStorageMarkers.contains(where: { path.contains($0) })
+            || path.hasPrefix(temporary.hasSuffix("/") ? temporary : temporary + "/")
+    }
+
+    // A known image extension decides; a missing or unknown one is decided by the first bytes.
+    static func isImage(_ url: URL) -> Bool {
+        let ext = url.pathExtension
+        if !ext.isEmpty, let type = UTType(filenameExtension: ext) { return type.conforms(to: .image) }
+        return sniffedExtension(of: url) != nil
+    }
+
+    // The extension of the image format named by the file's first bytes, or nil.
+    static func sniffedExtension(of url: URL) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let head = [UInt8]((try? handle.read(upToCount: 12)) ?? Data())
+        func starts(_ bytes: [UInt8], at offset: Int = 0) -> Bool {
+            head.count >= offset + bytes.count && Array(head[offset..<offset + bytes.count]) == bytes
+        }
+        func text(_ value: String) -> [UInt8] { Array(value.utf8) }
+        if starts([0xFF, 0xD8, 0xFF]) { return "jpg" }
+        if starts([0x89, 0x50, 0x4E, 0x47]) { return "png" }
+        if starts(text("GIF8")) { return "gif" }
+        if starts(text("RIFF")) && starts(text("WEBP"), at: 8) { return "webp" }
+        if starts(text("ftyp"), at: 4), head.count >= 12,
+           ["heic", "heix", "heim", "heis", "hevc", "mif1", "msf1"].contains(String(decoding: head[8..<12], as: UTF8.self)) { return "heic" }
+        return nil
+    }
+
+    // The name to store: the source's own name, plus the extension its bytes name when the name has none.
+    static func storedName(for source: URL) -> String {
+        let name = source.lastPathComponent
+        guard source.pathExtension.isEmpty, let ext = sniffedExtension(of: source) else { return name }
+        return "\(name).\(ext)"
+    }
+}
+
 enum FileVault {
+    // Stores one dropped or copied file. An image from app storage becomes an image clip (PNG); anything else a file clip.
+    static func clip(for source: URL, into root: URL) throws -> Clip {
+        if ImageFiles.isInAppStorage(source), ImageFiles.isImage(source), let data = try? Data(contentsOf: source),
+           let png = PasteboardImages.png(from: data) {
+            return Clip(kind: .image, data: png)
+        }
+        return try copy(source, into: root)
+    }
+
     static func copy(_ source: URL, into root: URL) throws -> Clip {
         let accessing = source.startAccessingSecurityScopedResource()
         defer { if accessing { source.stopAccessingSecurityScopedResource() } }
@@ -16,7 +73,7 @@ enum FileVault {
         guard attributes.isRegularFile == true, attributes.isDirectory != true else {
             throw NSError(domain: "NotchClip", code: 1, userInfo: [NSLocalizedDescriptionKey: "Можно добавить только обычный файл, не папку."])
         }
-        let record = StoredFile(id: UUID(), name: source.lastPathComponent)
+        let record = StoredFile(id: UUID(), name: ImageFiles.storedName(for: source))
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let folder = root.appendingPathComponent(record.id.uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -122,7 +179,17 @@ private struct PromiseTimeout: Error {}
     static let accessFailureMessage = "Приложение не дало доступ к файлу. Попробуй «Копировать» или «Сохранить как»."
     static let folderWithoutMediaMessage = "В папке нет изображений или медиафайлов."
     static let missingFileMessage = "Файл не найден."
+    static let fullDiskAccessMessage = "Нет доступа к файлам другого приложения. Дай NotchClip «Полный доступ к диску»."
+    static let fullDiskAccessURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!
     nonisolated static let maxFolderFiles = 20
+
+    // Opens a TCC-protected file read-only to see whether Full Disk Access is granted. Reads no content.
+    nonisolated static func hasFullDiskAccess() -> Bool {
+        let probe = NSHomeDirectory() + "/Library/Safari/Bookmarks.plist"
+        guard FileManager.default.fileExists(atPath: probe), let handle = FileHandle(forReadingAtPath: probe) else { return false }
+        try? handle.close()
+        return true
+    }
 
     @Published private(set) var history: History
     @Published var errorMessage: String?
@@ -237,7 +304,8 @@ private struct PromiseTimeout: Error {}
                 } catch {
                     lines.append("error: \(error.localizedDescription)")
                     failures.append(ImportFailure(url: url, needsAccess: Self.needsSourcePermission(error, source: url),
-                                                  noMedia: error is FolderHasNoMedia, missing: !FileManager.default.fileExists(atPath: url.path)))
+                                                  noMedia: error is FolderHasNoMedia, missing: !FileManager.default.fileExists(atPath: url.path),
+                                                  denied: Self.isPermissionDenied(error, source: url)))
                 }
             }
             let result = URLImportResult(clips: clips, failures: failures, diagnostics: lines.joined(separator: "\n"))
@@ -251,7 +319,7 @@ private struct PromiseTimeout: Error {}
         defer { if scoped { original.stopAccessingSecurityScopedResource() } }
         let source = original.resolvingSymlinksInPath()
         let isFolder = (try? source.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
-        guard isFolder else { return [try FileVault.copy(source, into: root)] }
+        guard isFolder else { return [try FileVault.clip(for: source, into: root)] }
         let items = try FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: [.isRegularFileKey, .contentTypeKey], options: [.skipsHiddenFiles])
             .filter(isMedia)
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
@@ -259,7 +327,7 @@ private struct PromiseTimeout: Error {}
         var clips: [Clip] = []
         var lastError: Error?
         for item in items.prefix(maxFolderFiles) {
-            do { clips.append(try FileVault.copy(item, into: root)) } catch { lastError = error }
+            do { clips.append(try FileVault.clip(for: item, into: root)) } catch { lastError = error }
         }
         if clips.isEmpty, let lastError { throw lastError }
         return clips
@@ -285,6 +353,7 @@ private struct PromiseTimeout: Error {}
         writeImportDiagnostics(result.diagnostics)
         if result.failures.allSatisfy(\.noMedia) { errorMessage = Self.folderWithoutMediaMessage }
         else if result.failures.allSatisfy(\.missing) { errorMessage = Self.missingFileMessage }
+        else if result.failures.contains(where: \.denied) { errorMessage = Self.fullDiskAccessMessage }
         else { errorMessage = Self.accessFailureMessage }
     }
 
@@ -304,7 +373,7 @@ private struct PromiseTimeout: Error {}
                 let result: Result<Clip, Error>
                 do {
                     if let error { throw error }
-                    result = .success(try FileVault.copy(url, into: root))
+                    result = .success(try FileVault.clip(for: url, into: root))
                 } catch {
                     result = .failure(error)
                 }
@@ -366,6 +435,18 @@ private struct PromiseTimeout: Error {}
         return !FileManager.default.isReadableFile(atPath: source.path)
     }
 
+    // True when the file exists but macOS refuses access (sandbox/TCC denial, EPERM, or unreadable mode bits).
+    nonisolated static func isPermissionDenied(_ error: Error, source: URL) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain,
+           [NSFileReadNoPermissionError, NSFileWriteNoPermissionError].contains(nsError.code) { return true }
+        if nsError.domain == NSPOSIXErrorDomain, nsError.code == EPERM { return true }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError,
+           underlying.domain == NSPOSIXErrorDomain, underlying.code == EPERM { return true }
+        let fm = FileManager.default
+        return fm.fileExists(atPath: source.path) && !fm.isReadableFile(atPath: source.path)
+    }
+
     // Overwrites a small text report with the pasteboard type names and file-URL
     // readability. It never contains clip contents.
     private func writeImportDiagnostics(_ text: String) {
@@ -423,7 +504,7 @@ private struct PromiseTimeout: Error {}
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             defer { if accessing { folder.stopAccessingSecurityScopedResource() } }
             do {
-                let clip = try FileVault.copy(sourceInFolder, into: root)
+                let clip = try FileVault.clip(for: sourceInFolder, into: root)
                 let bookmark = try? folder.bookmarkData(options: [.withSecurityScope, .securityScopeAllowOnlyReadAccess], includingResourceValuesForKeys: nil, relativeTo: nil)
                 Task { @MainActor in
                     guard let self else { return }
@@ -557,6 +638,7 @@ private struct ImportFailure {
     let needsAccess: Bool
     let noMedia: Bool
     let missing: Bool
+    let denied: Bool
 }
 
 // A clip from a file import, and whether its original file already lives in Downloads.

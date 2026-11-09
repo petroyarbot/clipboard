@@ -45,87 +45,16 @@ enum IslandAnimation {
     }
 }
 
-/// Эффект проявления для `.transition`: blur 6 -> 0, scale 0.96 -> 1, opacity 0 -> 1.
-/// Применяется только как transition вставки/удаления, поэтому у содержимого в покое нет постоянной модели
-/// "прогресса": нечему зависнуть на промежуточном значении.
-private struct RevealEffect: ViewModifier {
-    let hidden: Bool
-    func body(content: Content) -> some View {
-        content
-            .opacity(hidden ? 0 : 1)
-            .blur(radius: hidden ? 6 : 0)
-            .scaleEffect(hidden ? 0.96 : 1)
-    }
-}
-
-extension AnyTransition {
-    /// Проявление с блюром; при "Уменьшить движение" только прозрачность.
-    static func reveal(reduceMotion: Bool) -> AnyTransition {
-        if reduceMotion { return .opacity }
-        return .modifier(active: RevealEffect(hidden: true), identity: RevealEffect(hidden: false))
-    }
-}
-
-/// Состояние вставки (класс: макрос @State недоступен в CLT, как и в SettingsView).
-private final class RevealModel: ObservableObject {
-    @Published var shown: Bool
-    @Published var generation = 0
-    @Published var settledGeneration = -1
-    var pending = 0
-    init(shown: Bool) { self.shown = shown }
-}
-
-/// Содержимое вставляется в иерархию уже после показа окна (на следующем проходе цикла событий) и проявляется
-/// как transition вставки. Никакого постоянного blur/opacity на всей панели: в покое у содержимого эффектов нет.
-/// Каждое открытие (`visible` стал true или сменился `token`) вставляет содержимое заново.
-/// Страховка: если через 0.8 с содержимое всё ещё помечено "в анимации", оно пересоздаётся без transition.
+/// Видимость слоя островка. Чистая функция от состояния: непрозрачность 1 при `visible`, иначе 0, без отдельной
+/// модели прогресса и без blur. Анимация только сглаживает переход; итоговое значение всегда определяется `visible`.
 struct IslandReveal: ViewModifier {
     let visible: Bool
-    let token: Int
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @StateObject private var model: RevealModel
-
-    init(visible: Bool, token: Int = 0) {
-        self.visible = visible
-        self.token = token
-        _model = StateObject(wrappedValue: RevealModel(shown: visible))
-    }
 
     func body(content: Content) -> some View {
-        Group {
-            if model.shown {
-                content
-                    .id(model.generation)
-                    .transition(model.settledGeneration == model.generation ? .identity : .reveal(reduceMotion: reduceMotion))
-            }
-        }
-        .allowsHitTesting(visible)
-        .onChange(of: visible) { apply($0) }
-        .onChange(of: token) { _ in if visible { apply(true) } }
-    }
-
-    private func apply(_ on: Bool) {
-        let model = model
-        let visible = visible
-        model.pending &+= 1
-        let ticket = model.pending
-        guard on else {
-            withAnimation(IslandAnimation.reveal(visible: false, reduceMotion: reduceMotion)) { model.shown = false }
-            return
-        }
-        // Убираем старое содержимое без анимации, на следующем проходе цикла вставляем с transition.
-        var instant = Transaction(); instant.disablesAnimations = true
-        withTransaction(instant) { model.shown = false; model.generation &+= 1 }
-        let animation = IslandAnimation.reveal(visible: true, reduceMotion: reduceMotion)
-        DispatchQueue.main.async {
-            guard model.pending == ticket, visible else { return }
-            withAnimation(animation) { model.shown = true }
-        }
-        // Страховка: пересоздать содержимое без transition, если проявление не завершилось.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            guard model.pending == ticket, visible, model.shown else { return }
-            var instant = Transaction(); instant.disablesAnimations = true
-            withTransaction(instant) { model.generation &+= 1; model.settledGeneration = model.generation }
-        }
+        content
+            .opacity(visible ? 1 : 0)
+            .animation(IslandAnimation.reveal(visible: visible, reduceMotion: reduceMotion), value: visible)
+            .allowsHitTesting(visible)
     }
 }

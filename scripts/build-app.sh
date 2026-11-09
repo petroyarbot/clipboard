@@ -34,5 +34,18 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
-codesign --force --sign - "$APP"
+# Стабильная подпись локальным сертификатом сохраняет разрешения macOS между сборками.
+SIGN_IDENTITY="NotchClip Local Signing"
+SIGN_OUT="$(security find-identity -v -p codesigning)"
+case "$SIGN_OUT" in
+  *"$SIGN_IDENTITY"*)
+    codesign --force --deep --sign "$SIGN_IDENTITY" --identifier app.notchclip.mac "$APP"
+    echo "Подпись: «${SIGN_IDENTITY}» (стабильная, разрешения macOS сохраняются)."
+    ;;
+  *)
+    codesign --force --sign - "$APP"
+    echo "Подпись: ad-hoc (временная)."
+    echo "Подпись временная — разрешения macOS будут слетать после обновлений. Запусти ./scripts/setup-signing.sh"
+    ;;
+esac
 echo "Built: $APP"

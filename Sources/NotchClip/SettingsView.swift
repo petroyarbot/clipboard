@@ -262,12 +262,25 @@ private struct BufferSettingsTab: View {
                 Toggle("Сохранять фото и файлы в Загрузки", isOn: $saveToDownloads)
             }
             Section {
+                HStack {
+                    Text("Полный доступ к диску: \(state.hasFullDisk ? "есть" : "нет")")
+                    Spacer()
+                    Button("Открыть настройки") { NSWorkspace.shared.open(ClipboardStore.fullDiskAccessURL) }
+                }
+            } footer: {
+                Text("Нужен, чтобы копировать медиа из других приложений, например Telegram.")
+            }
+            Section {
                 Button("Очистить историю…", role: .destructive) { state.confirmClear = true }
             } footer: {
                 Text("История хранится локально на этом Mac, без шифрования.")
             }
         }
         .formStyle(.grouped)
+        .onAppear { state.hasFullDisk = ClipboardStore.hasFullDiskAccess() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            state.hasFullDisk = ClipboardStore.hasFullDiskAccess()
+        }
         .confirmationDialog("Очистить историю?", isPresented: $state.confirmClear, titleVisibility: .visible) {
             Button("Очистить незакреплённые", role: .destructive) { store.clear() }
             Button("Очистить всё, включая закреплённые", role: .destructive) { store.clearAll() }
@@ -481,6 +494,7 @@ private struct HookOutputSheet: View {
 
 @MainActor final class BufferTabState: ObservableObject {
     @Published var confirmClear = false
+    @Published var hasFullDisk = false
 }
 
 @MainActor final class AgentsTabState: ObservableObject {

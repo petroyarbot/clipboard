@@ -17,3 +17,4 @@ swiftc Sources/NotchClip/SettingsMapping.swift Tests/SettingsMapping/main.swift 
 ./scripts/test-focus-timer.sh
 ./scripts/test-time-wheel.sh
 ./scripts/test-island.sh
+./scripts/test-panel-render.sh
