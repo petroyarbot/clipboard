@@ -11,5 +11,8 @@ swiftc -D NOTCHCLIP_TESTING -parse-as-library Sources/NotchClip/*.swift Tests/Dr
 "$work_dir/drop-tests"
 swiftc Sources/NotchClip/PanelTab.swift Tests/PanelTabs/main.swift -o "$work_dir/panel-tab-tests"
 "$work_dir/panel-tab-tests"
+swiftc Sources/NotchClip/SettingsMapping.swift Tests/SettingsMapping/main.swift -o "$work_dir/settings-mapping-tests"
+"$work_dir/settings-mapping-tests"
 ./scripts/test-agents.sh
 ./scripts/test-focus-timer.sh
+./scripts/test-island.sh

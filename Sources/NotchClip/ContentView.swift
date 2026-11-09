@@ -1,37 +1,22 @@
 import SwiftUI
 import AppKit
-import ServiceManagement
 import UniformTypeIdentifiers
 
 final class ViewState: ObservableObject {
     @Published var query = ""
-    @Published var showingSettings = false
-    @Published var confirmClear = false
     @Published var confirmHistoryClear = false
     @Published var filter = 0
     @Published var editingID: UUID?
     @Published var editText = ""
     @Published var previewID: UUID?
     @Published var isEditing = false
-    @Published var widthDraft = ""
-    @Published var heightDraft = ""
-    @Published var settingsError: String?
-    @Published var loginStatus: SMAppService.Status = .notRegistered
-    @Published var loginError: String?
 }
 
 struct ContentView: View {
     @ObservedObject var store: ClipboardStore
     @ObservedObject var delegate: AppDelegate
-    @AppStorage("hoverEnabled") var hoverEnabled = true
-    @AppStorage("shortcut") var shortcut = 0
     @AppStorage("panelWidth") var panelWidth = 620.0
     @AppStorage("panelHeight") var panelHeight = 500.0
-    @AppStorage("animationDuration") var animationDuration = 0.30
-    @AppStorage("animationBounce") var animationBounce = 0.12
-    @AppStorage("hoverOpenDelay") var hoverOpenDelay = 0.0
-    @AppStorage("hoverCloseDelay") var hoverCloseDelay = 0.30
-    @AppStorage(ClipboardStore.downloadsKey) var saveToDownloads = true
     @AppStorage(PanelTab.storageKey) private var tabRaw = PanelTab.clipboard.rawValue
     @StateObject private var state = ViewState()
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -47,7 +32,7 @@ struct ContentView: View {
     }
     var tab: PanelTab { PanelTab.restore(tabRaw) }
     var tabBinding: Binding<PanelTab> {
-        Binding(get: { PanelTab.restore(tabRaw) }, set: { tabRaw = $0.rawValue })
+        Binding(get: { PanelTab.restore(tabRaw) }, set: { value in withAnimation(IslandAnimation.interactive) { tabRaw = value.rawValue } })
     }
     var body: some View {
         let width = delegate.expanded ? panelWidth : Double(delegate.collapsedWidth)
@@ -58,28 +43,27 @@ struct ContentView: View {
         .overlay(alignment: .top) {
             content.padding(.horizontal, 22).padding(.top, max(delegate.collapsedHeight + 8, 36)).padding(.bottom, 18)
                 .frame(width: panelWidth, height: panelHeight, alignment: .top)
-                .opacity(delegate.expanded ? 1 : 0)
-                .allowsHitTesting(delegate.expanded)
+                .modifier(IslandReveal(visible: delegate.expanded))
         }
         .clipShape(shape)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .preferredColorScheme(.dark)
         .onChange(of: delegate.expanded) { open in
-            if !open { state.editingID = nil; state.previewID = nil; state.isEditing = false; state.showingSettings = false }
+            if !open { state.editingID = nil; state.previewID = nil; state.isEditing = false }
         }
     }
     var content: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                if state.showingSettings || state.previewID != nil {
+                if state.previewID != nil {
                     Image(systemName: "clipboard").font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.85))
-                    Text(state.showingSettings ? "Настройки" : "Просмотр")
+                    Text("Просмотр")
                         .font(.system(size: 15, weight: .semibold)).fixedSize()
                 } else {
                     PanelTabBar(selection: tabBinding, agents: delegate.agents)
                 }
-                if !state.showingSettings && state.previewID == nil && tab == .clipboard {
+                if state.previewID == nil && tab == .clipboard {
                     HStack(spacing: 7) {
                         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                         TextField("Поиск в истории", text: $state.query).textFieldStyle(.plain)
@@ -89,11 +73,11 @@ struct ContentView: View {
                 } else { Spacer(minLength: 0) }
                 Button {
                     if state.previewID != nil { closePreview() }
-                    else { state.showingSettings.toggle(); state.widthDraft = String(Int(panelWidth)); state.heightDraft = String(Int(panelHeight)) }
+                    else { delegate.openSettings() }
                 } label: {
-                    Image(systemName: state.showingSettings || state.previewID != nil ? "chevron.left" : "slider.horizontal.3")
+                    Image(systemName: state.previewID != nil ? "chevron.left" : "slider.horizontal.3")
                         .frame(width: 32, height: 32).contentShape(Rectangle())
-                }.buttonStyle(.plain).accessibilityLabel(state.showingSettings || state.previewID != nil ? "Назад к истории" : "Настройки").help(state.showingSettings || state.previewID != nil ? "Назад к истории" : "Настройки")
+                }.buttonStyle(.plain).accessibilityLabel(state.previewID != nil ? "Назад к истории" : "Настройки").help(state.previewID != nil ? "Назад к истории" : "Настройки")
                 Button { delegate.close() } label: {
                     Image(systemName: "xmark").frame(width: 28, height: 32).contentShape(Rectangle())
                 }.buttonStyle(.plain).accessibilityLabel("Закрыть").help("Закрыть")
@@ -101,9 +85,7 @@ struct ContentView: View {
             if let error = store.errorMessage {
                 Text(error).font(.caption).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading)
             }
-            if state.showingSettings {
-                settings
-            } else if let id = state.previewID, let clip = store.history.clips.first(where: { $0.id == id }) {
+            if let id = state.previewID, let clip = store.history.clips.first(where: { $0.id == id }) {
                 preview(clip)
             } else {
                 switch tab {
@@ -154,65 +136,6 @@ struct ContentView: View {
             }
         }
     }
-    var settings: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 11) {
-                Toggle("Открывать при наведении", isOn: $hoverEnabled)
-                Picker("Горячая клавиша", selection: $shortcut) {
-                    Text("⌘ ⇧ V").tag(0); Text("⌘ ⇧ C").tag(1); Text("⌘ ⇧ Space").tag(2)
-                }.onChange(of: shortcut) { _ in delegate.registerShortcut() }
-                launchAtLoginRow
-                Toggle("Сохранять фото и файлы в Загрузки", isOn: $saveToDownloads)
-                Text("Размер панели").font(.system(size: 13, weight: .semibold))
-                HStack(spacing: 7) {
-                    sizePreset("Компактный", width: 480, height: 400)
-                    sizePreset("Средний", width: 620, height: 500)
-                    sizePreset("Большой", width: 760, height: 600)
-                }
-                HStack(spacing: 8) {
-                    TextField("Ширина", text: $state.widthDraft).textFieldStyle(.roundedBorder).frame(minWidth: 65, maxWidth: 100)
-                    Text("×").foregroundStyle(.secondary)
-                    TextField("Высота", text: $state.heightDraft).textFieldStyle(.roundedBorder).frame(minWidth: 65, maxWidth: 100)
-                    Button("Применить", action: applySize)
-                }
-                Text("Ширина 420–800, высота 360–650 пт").font(.caption).foregroundStyle(.secondary)
-                if let error = state.settingsError { Text(error).font(.caption).foregroundStyle(.orange) }
-                settingStepper("Длительность", value: $animationDuration, range: 0.2...0.8, step: 0.05, unit: "с")
-                settingStepper("Упругость", value: $animationBounce, range: 0...0.35, step: 0.05, unit: "")
-                settingStepper("Задержка открытия", value: $hoverOpenDelay, range: 0...0.8, step: 0.05, unit: "с")
-                settingStepper("Задержка закрытия", value: $hoverCloseDelay, range: 0...1.5, step: 0.05, unit: "с")
-                Text("История хранится локально без шифрования.").font(.caption).foregroundStyle(.secondary)
-                Button("Очистить незакреплённую историю", role: .destructive) { state.confirmClear = true }
-                    .confirmationDialog("Удалить незакреплённые записи?", isPresented: $state.confirmClear) {
-                        Button("Очистить", role: .destructive) { store.clear() }
-                    }
-                Button("Выйти из NotchClip") { NSApp.terminate(nil) }
-            }.padding(.vertical, 8).padding(.horizontal, 4)
-        }
-        .onAppear { refreshLoginStatus() }
-    }
-    var launchAtLoginRow: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle("Запускать при входе", isOn: Binding(get: { state.loginStatus == .enabled }, set: setLaunchAtLogin))
-            if state.loginStatus == .requiresApproval {
-                HStack(spacing: 6) {
-                    Text("Разреши в Системных настройках → Основные → Объекты входа").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Button("Открыть") { SMAppService.openSystemSettingsLoginItems() }.controlSize(.small)
-                }
-            }
-            if let error = state.loginError { Text(error).font(.caption).foregroundStyle(.orange) }
-        }
-    }
-    func refreshLoginStatus() { state.loginStatus = SMAppService.mainApp.status }
-    func setLaunchAtLogin(_ on: Bool) {
-        do {
-            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-            state.loginError = nil
-        } catch {
-            state.loginError = "Не удалось изменить: \(error.localizedDescription)"
-        }
-        refreshLoginStatus()
-    }
     func filterBar(showIcons: Bool) -> some View {
         HStack(spacing: 5) {
             filterButton("Все", icon: nil, value: 0)
@@ -233,21 +156,6 @@ struct ContentView: View {
         }.buttonStyle(.plain).accessibilityLabel(value == 2 ? "Изображения" : title).accessibilityAddTraits(state.filter == value ? .isSelected : [])
     }
 
-    func sizePreset(_ title: String, width: Double, height: Double) -> some View {
-        Button(title) { panelWidth = width; panelHeight = height; state.widthDraft = String(Int(width)); state.heightDraft = String(Int(height)); state.settingsError = nil; delegate.updatePanelSize() }
-            .font(.system(size: 12)).controlSize(.small)
-    }
-    func applySize() {
-        guard let w = Double(state.widthDraft), let h = Double(state.heightDraft), (420...800).contains(w), (360...650).contains(h) else {
-            state.settingsError = "Введи размеры в указанном диапазоне."; return
-        }
-        panelWidth = w; panelHeight = h; state.settingsError = nil; delegate.updatePanelSize()
-    }
-    func settingStepper(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double, unit: String) -> some View {
-        Stepper(value: value, in: range, step: step) {
-            HStack { Text(title); Spacer(); Text(String(format: "%.2f %@", value.wrappedValue, unit)).foregroundStyle(.secondary).monospacedDigit() }
-        }.font(.system(size: 13))
-    }
     func link(for clip: Clip) -> URL? { clip.linkURL }
     func fileName(for clip: Clip) -> String { (try? JSONDecoder().decode(StoredFile.self, from: clip.data))?.name ?? "Файл" }
     func isImageFile(_ clip: Clip) -> Bool {
@@ -337,9 +245,15 @@ struct ContentView: View {
 
 // The top edge stays attached to the screen while the lower corners expand.
 struct NotchShape: Shape {
+    var bottomRadius: CGFloat = 26
+    var animatableData: CGFloat {
+        get { bottomRadius }
+        set { bottomRadius = newValue }
+    }
+
     func path(in rect: CGRect) -> Path {
         let top = min(16, rect.width / 6, rect.height / 3)
-        let bottom = min(26, rect.width / 3, max(0, rect.height - top))
+        let bottom = min(bottomRadius, rect.width / 3, max(0, rect.height - top))
         var path = Path()
         path.move(to: CGPoint(x: rect.minX, y: rect.minY))
         path.addQuadCurve(to: CGPoint(x: rect.minX + top, y: rect.minY + top), control: CGPoint(x: rect.minX + top, y: rect.minY))

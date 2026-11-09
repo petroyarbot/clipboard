@@ -288,6 +288,129 @@ func monitorChecks(dataDirectory: URL) async throws {
 
 try await monitorChecks(dataDirectory: root)
 
+// MARK: - Claude usage API (fake token provider and fake transport, no network)
+
+final class FakeUsageTransport: UsageTransport, @unchecked Sendable {
+    let status: Int
+    let body: Data
+    private(set) var requests: [URLRequest] = []
+
+    init(status: Int, body: Data = Data()) {
+        self.status = status
+        self.body = body
+    }
+
+    func send(_ request: URLRequest) async throws -> (status: Int, body: Data) {
+        requests.append(request)
+        return (status, body)
+    }
+}
+
+let apiToken = "fake-token-for-tests"
+let fakeLogin: ClaudeTokenProvider = {
+    .found(ClaudeCredentials(accessToken: apiToken, expiresAt: Date(timeIntervalSinceNow: 3600)))
+}
+let missingLogin: ClaudeTokenProvider = { .notLoggedIn }
+let expiredLogin: ClaudeTokenProvider = {
+    .found(ClaudeCredentials(accessToken: apiToken, expiresAt: Date(timeIntervalSinceNow: -60)))
+}
+let sampleAPI = data("""
+{"five_hour":{"utilization":37.5,"resets_at":"2030-01-01T00:00:00.123456+00:00"},"seven_day":null,"seven_day_opus":null}
+""")
+let resetEpoch = 1893456000.0  // 2030-01-01T00:00:00Z
+
+let parsedAPI = ClaudeUsageResponse.limits(from: sampleAPI, now: now)
+check(parsedAPI?.fiveHourLeft == 62, "api utilization 37.5 leaves 62 percent")
+check(parsedAPI?.weekLeft == nil, "api null seven_day leaves the week unknown")
+check(parsedAPI?.weekReset == nil, "api null seven_day has no reset")
+check(parsedAPI?.updatedAt == now, "api limits are stamped with the fetch time")
+check(parsedAPI?.fiveHourReset != nil && abs((parsedAPI?.fiveHourReset?.timeIntervalSince1970 ?? 0) - (resetEpoch + 0.123456)) < 0.001, "api microsecond resets_at parses")
+
+check(UsageParser.parseDate("2030-01-01T00:00:00Z")?.timeIntervalSince1970 == resetEpoch, "ISO date without fraction parses")
+check(UsageParser.parseDate("2030-01-01T00:00:00.500Z")?.timeIntervalSince1970 == resetEpoch + 0.5, "ISO date with milliseconds parses")
+check(UsageParser.parseDate("2030-01-01T00:00:00.123456+00:00") != nil, "ISO date with microseconds parses")
+check(ClaudeUsageResponse.limits(from: data(#"{"five_hour":null,"seven_day":null}"#), now: now) == nil, "response without windows is a failure")
+
+let parsedKeychain = ClaudeKeychain.parse(data(#"{"claudeAiOauth":{"accessToken":"fake-token-for-tests","expiresAt":1893456000000}}"#))
+if case .found(let creds) = parsedKeychain {
+    check(creds.accessToken == apiToken && creds.expiresAt?.timeIntervalSince1970 == resetEpoch, "keychain JSON yields token and ms expiry")
+} else {
+    check(false, "keychain JSON with token parses")
+}
+check(ClaudeKeychain.parse(data(#"{"claudeAiOauth":{}}"#)) == .notLoggedIn, "keychain JSON without token means notLoggedIn")
+
+let noItemTransport = FakeUsageTransport(status: 200, body: sampleAPI)
+let noItem = await ClaudeUsageClient(tokenProvider: missingLogin, transport: noItemTransport).fetch(now: now)
+check(noItem == .notLoggedIn && noItemTransport.requests.isEmpty, "missing keychain item means notLoggedIn without a request")
+
+let expiredTransport = FakeUsageTransport(status: 200, body: sampleAPI)
+let expired = await ClaudeUsageClient(tokenProvider: expiredLogin, transport: expiredTransport).fetch(now: now)
+check(expired == .tokenExpired && expiredTransport.requests.isEmpty, "expired token means tokenExpired without a request")
+
+let okTransport = FakeUsageTransport(status: 200, body: sampleAPI)
+let okFetch = await ClaudeUsageClient(tokenProvider: fakeLogin, transport: okTransport).fetch(now: now)
+check(okFetch == .success(parsedAPI!), "200 response is parsed into limits")
+let sent = okTransport.requests.first
+check(okTransport.requests.count == 1, "one request per fetch")
+check(sent?.url?.absoluteString == "https://api.anthropic.com/api/oauth/usage", "request goes to the usage endpoint")
+check(sent?.httpMethod == "GET", "request is a GET")
+check(sent?.value(forHTTPHeaderField: "Authorization") == "Bearer \(apiToken)", "request carries the bearer token")
+check(sent?.value(forHTTPHeaderField: "anthropic-beta") == "oauth-2025-04-20", "request sends the oauth beta header")
+check(sent?.value(forHTTPHeaderField: "User-Agent") == "NotchClip", "request identifies NotchClip")
+check(sent?.timeoutInterval == 10, "request timeout is 10 s")
+
+for code in [401, 403] {
+    let transport = FakeUsageTransport(status: code)
+    let result = await ClaudeUsageClient(tokenProvider: fakeLogin, transport: transport).fetch(now: now)
+    check(result == .tokenExpired, "HTTP \(code) means tokenExpired")
+}
+let limitedTransport = FakeUsageTransport(status: 429)
+let limited = await ClaudeUsageClient(tokenProvider: fakeLogin, transport: limitedTransport).fetch(now: now)
+check(limited == .rateLimited, "HTTP 429 means rateLimited")
+
+// Backoff: 429 doubles the interval up to 30 min; success returns it to 5 min.
+var backoff = ClaudeApiState()
+check(backoff.interval == 300, "claude API starts at 5 min")
+backoff.apply(.rateLimited, now: now)
+check(backoff.interval == 600, "429 doubles the interval to 10 min")
+backoff.apply(.rateLimited, now: now)
+check(backoff.interval == 1200, "second 429 doubles the interval to 20 min")
+backoff.apply(.rateLimited, now: now)
+backoff.apply(.rateLimited, now: now)
+check(backoff.interval == 1800, "interval stops at 30 min")
+backoff.apply(.success(parsedAPI!), now: now)
+check(backoff.interval == 300, "success resets the interval to 5 min")
+check(backoff.isDue(now: now) == false && backoff.isDue(now: now.addingTimeInterval(301)), "next fetch is due after the interval")
+
+// Failures keep the last good values.
+var kept = ClaudeApiState()
+kept.apply(.success(parsedAPI!), now: now)
+kept.apply(.failure("Нет связи с сервером Claude"), now: now.addingTimeInterval(300))
+check(kept.limits == parsedAPI, "failure keeps the last good values")
+check(kept.status == .error("Нет связи с сервером Claude"), "failure is reported in the status")
+kept.apply(.tokenExpired, now: now.addingTimeInterval(600))
+check(kept.limits == parsedAPI && kept.status == .tokenExpired, "token expiry keeps values and reports tokenExpired")
+
+// Denied Keychain access: status is set, no automatic retry, and a manual refresh allows one.
+var denied = ClaudeApiState()
+denied.apply(.accessDenied, now: now)
+check(denied.status == .error(ClaudeKeychain.accessDeniedText), "denied Keychain access reports the Keychain hint")
+check(denied.isDue(now: now.addingTimeInterval(86_400 * 365)) == false, "denied access is never retried automatically")
+denied.allowFetchNow()
+check(denied.isDue(now: now), "manual refresh makes the denied source due again")
+let deniedLogin: ClaudeTokenProvider = { .accessDenied }
+let deniedTransport = FakeUsageTransport(status: 200, body: sampleAPI)
+let deniedFetch = await ClaudeUsageClient(tokenProvider: deniedLogin, transport: deniedTransport).fetch(now: now)
+check(deniedFetch == .accessDenied && deniedTransport.requests.isEmpty, "denied Keychain access sends no request")
+
+// Status line file is used only when it is newer than the last API success.
+let olderFile = Limits(fiveHourLeft: 10, fiveHourReset: nil, weekLeft: nil, weekReset: nil, updatedAt: now.addingTimeInterval(-60))
+let newerFile = Limits(fiveHourLeft: 50, fiveHourReset: nil, weekLeft: nil, weekReset: nil, updatedAt: now.addingTimeInterval(60))
+check(kept.resolve(file: newerFile) == newerFile, "newer status line file wins over the API")
+check(kept.resolve(file: olderFile) == parsedAPI, "older status line file is ignored when the API has data")
+check(ClaudeApiState().resolve(file: olderFile) == olderFile, "status line file is used when the API never succeeded")
+check(ClaudeApiState().resolve(file: nil) == nil, "no API and no file means no Claude data")
+
 try? fm.removeItem(at: root)
 
 if failures > 0 {

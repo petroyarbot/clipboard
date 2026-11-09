@@ -189,6 +189,47 @@ func runTests() -> Int {
         check(reopened.focusMinutes == 50, "custom duration persists")
     }
 
+    // 9. Звук в конце фазы: по умолчанию играет, при выключении молчит, уведомление остаётся.
+    do {
+        let soundDefaults = UserDefaults(suiteName: suite + "-sound")!
+        defer { soundDefaults.removePersistentDomain(forName: suite + "-sound") }
+        let clock = FakeClock(noon)
+        let recorder = Recorder()
+        let timer = makeTimer(clock, soundDefaults, recorder)
+        finishPhase(timer, clock)
+        check(recorder.sounds == 1, "phase end plays sound by default")
+        soundDefaults.set(false, forKey: FocusTimer.soundEnabledKey)
+        let silentRecorder = Recorder()
+        let silent = makeTimer(clock, soundDefaults, silentRecorder)
+        finishPhase(silent, clock)
+        check(silentRecorder.sounds == 0, "phase end is silent when sound is off")
+        check(silentRecorder.messages.count == 1, "phase end still posts a notification when sound is off")
+    }
+
+    // 8. Сброс настроек во время фазы: новые длительности применяются со следующей фазы.
+    do {
+        let suite = UserDefaults(suiteName: "focus-reload-\(UUID().uuidString)")!
+        let clock = FakeClock(noon)
+        let timer = makeTimer(clock, suite, Recorder())
+        timer.start()
+        suite.set(10, forKey: "focusTimer.focusMinutes")
+        timer.reloadDurations()
+        check(timer.focusMinutes == 25 && timer.duration(of: .focus) == 1500, "running phase keeps its duration after a reset")
+        clock.advance(timer.remaining)
+        timer.tick()
+        check(timer.phase == .shortBreak && timer.focusMinutes == 10, "reset durations apply at the next phase boundary")
+        timer.reset()
+        check(timer.state == .idle && timer.duration(of: .focus) == 600, "reset while idle reloads durations at once")
+
+        let cancelled = UserDefaults(suiteName: "focus-reload-cancel-\(UUID().uuidString)")!
+        let cancelTimer = makeTimer(clock, cancelled, Recorder())
+        cancelTimer.start()
+        cancelled.set(12, forKey: "focusTimer.focusMinutes")
+        cancelTimer.reloadDurations()
+        cancelTimer.reset()
+        check(cancelTimer.focusMinutes == 12, "cancelling a running phase applies pending durations")
+    }
+
     return failures
 }
 

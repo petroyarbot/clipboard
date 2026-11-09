@@ -14,7 +14,7 @@ expect() { # name, condition-result (0 = true)
 }
 
 # 1. Swift checks for UsageMonitor and AgentMonitor.
-swiftc Sources/NotchClip/UsageMonitor.swift Sources/NotchClip/AgentMonitor.swift Tests/AgentData/main.swift \
+swiftc Sources/NotchClip/UsageMonitor.swift Sources/NotchClip/ClaudeUsageClient.swift Sources/NotchClip/AgentMonitor.swift Tests/AgentData/main.swift \
   -o "$work_dir/agent-data-tests"
 "$work_dir/agent-data-tests"
 

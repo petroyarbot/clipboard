@@ -212,19 +212,97 @@ final class CodexLimitsReader: @unchecked Sendable {
     }
 }
 
-/// Publishes Claude and Codex limits. claude-limits.json is re-read on data-directory changes (debounced to
-/// at most once per second). Codex sessions are scanned only by the 30 s timer, on a background task.
+enum ClaudeUsageStatus: Equatable {
+    case ok
+    case notLoggedIn
+    case tokenExpired
+    case error(String)
+
+    /// Подсказка, когда лимитов нет (одинаково во вкладке "Агенты" и в настройках).
+    var hint: String {
+        switch self {
+        case .ok: return "Нет данных"
+        case .notLoggedIn: return "Войди в Claude Code CLI: в Терминале выполни claude и /login"
+        case .tokenExpired: return "Вход устарел — запусти claude в Терминале, он обновит вход"
+        case .error(let text): return text
+        }
+    }
+}
+
+/// State of the Claude API source: last good limits, status of the last attempt, and polling backoff.
+/// Kept apart from the monitor so the rules can be tested without the network.
+struct ClaudeApiState: Equatable {
+    static let baseInterval: TimeInterval = 300
+    static let maxInterval: TimeInterval = 1800
+
+    /// Last successful response. Kept when later attempts fail.
+    private(set) var limits: Limits?
+    private(set) var status: ClaudeUsageStatus = .ok
+    private(set) var interval: TimeInterval = baseInterval
+    private(set) var nextFetch: Date = .distantPast
+
+    func isDue(now: Date) -> Bool {
+        now >= nextFetch
+    }
+
+    /// A 429 doubles the interval up to 30 min. Any success returns to the base interval.
+    mutating func apply(_ result: ClaudeFetchResult, now: Date) {
+        switch result {
+        case .success(let fresh):
+            limits = fresh
+            status = .ok
+            interval = Self.baseInterval
+        case .accessDenied:
+            // Keychain access was refused: no automatic retry until the user asks again.
+            status = .error(ClaudeKeychain.accessDeniedText)
+            nextFetch = .distantFuture
+            return
+        case .notLoggedIn:
+            status = .notLoggedIn
+        case .tokenExpired:
+            status = .tokenExpired
+        case .rateLimited:
+            status = .error("Claude ограничил запросы, повторим позже")
+            interval = min(interval * 2, Self.maxInterval)
+        case .failure(let message):
+            status = .error(message)
+        }
+        nextFetch = now.addingTimeInterval(interval)
+    }
+
+    /// Manual refresh: the next due check happens now, whatever the backoff said.
+    mutating func allowFetchNow() {
+        nextFetch = .distantPast
+    }
+
+    /// The status line file is used only when it is newer than the last API success.
+    func resolve(file: Limits?) -> Limits? {
+        guard let file else { return limits }
+        guard let limits else { return file }
+        return file.updatedAt > limits.updatedAt ? file : limits
+    }
+}
+
+/// Publishes Claude and Codex limits. Claude comes from the usage API every 5 min (checked by the 30 s timer),
+/// with claude-limits.json as fallback when it is newer. claude-limits.json is re-read on data-directory changes
+/// (debounced to at most once per second). Codex sessions are scanned only by the 30 s timer, on a background task.
 @MainActor
 final class UsageMonitor: ObservableObject {
     static let claudeDebounce: TimeInterval = 1
 
     @Published private(set) var snapshot = UsageSnapshot(claude: nil, codex: nil)
+    @Published private(set) var claudeStatus: ClaudeUsageStatus = .ok
+    /// Time of the data behind the Claude row (API response or status line file), nil when there is none.
+    @Published private(set) var claudeUpdatedAt: Date?
 
     let dataDirectory: URL
     let pollInterval: TimeInterval
 
     private let codexReader: CodexLimitsReader
-    private var claude: Limits?
+    private let claudeClient: ClaudeUsageClient
+    private var claudeApi = ClaudeApiState()
+    private var claudeFile: Limits?
+    private var claudeFetching = false
     private var codex: Limits?
     private var codexLoading = false
     private var claudeTask: Task<Void, Never>?
@@ -234,11 +312,13 @@ final class UsageMonitor: ObservableObject {
     init(
         dataDirectory: URL = NotchClipDataLocation.directory,
         codexHome: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true),
-        pollInterval: TimeInterval = 30
+        pollInterval: TimeInterval = 30,
+        claudeClient: ClaudeUsageClient = ClaudeUsageClient()
     ) {
         self.dataDirectory = dataDirectory
         self.codexReader = CodexLimitsReader(sessionsDirectory: codexHome.appendingPathComponent("sessions", isDirectory: true))
         self.pollInterval = pollInterval
+        self.claudeClient = claudeClient
     }
 
     func start() {
@@ -261,10 +341,16 @@ final class UsageMonitor: ObservableObject {
         watcher = nil
     }
 
-    /// Re-reads Claude limits now and starts a Codex scan unless one is already running.
+    /// Re-reads Claude limits now (calling the API only when it is due) and starts a Codex scan unless one is already running.
     func refresh() {
         refreshClaude()
         refreshCodex()
+    }
+
+    /// "Обновить сейчас": calls the Claude API even after a denied Keychain access or a backoff.
+    func refreshNow() {
+        claudeApi.allowFetchNow()
+        refresh()
     }
 
     nonisolated static func loadClaude(url: URL, now: Date) -> Limits? {
@@ -272,14 +358,29 @@ final class UsageMonitor: ObservableObject {
     }
 
     private func refreshClaude() {
+        if !claudeFetching, claudeApi.isDue(now: Date()) {
+            fetchClaudeFromAPI()
+        }
         let url = dataDirectory.appendingPathComponent("claude-limits.json")
         Task.detached(priority: .utility) {
             let limits = UsageMonitor.loadClaude(url: url, now: Date())
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.claude = limits
+                self.claudeFile = limits
                 self.publish()
             }
+        }
+    }
+
+    private func fetchClaudeFromAPI() {
+        claudeFetching = true
+        let client = claudeClient
+        Task { [weak self] in
+            let result = await client.fetch(now: Date())
+            guard let self else { return }
+            self.claudeFetching = false
+            self.claudeApi.apply(result, now: Date())
+            self.publish()
         }
     }
 
@@ -311,6 +412,9 @@ final class UsageMonitor: ObservableObject {
     }
 
     private func publish() {
+        let claude = claudeApi.resolve(file: claudeFile)
+        if claudeStatus != claudeApi.status { claudeStatus = claudeApi.status }
+        if claudeUpdatedAt != claude?.updatedAt { claudeUpdatedAt = claude?.updatedAt }
         let next = UsageSnapshot(claude: claude, codex: codex)
         if snapshot != next { snapshot = next }
     }

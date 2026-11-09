@@ -24,13 +24,15 @@ struct AgentsView: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.6))
             limitRow(name: "Claude", limits: usage.snapshot.claude,
-                     emptyHint: "Нет данных — запусти scripts/agent-hooks/setup-agent-hooks.sh")
+                     emptyHint: claudeEmptyHint)
             limitRow(name: "Codex", limits: usage.snapshot.codex, emptyHint: "Нет данных")
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
     }
+
+    private var claudeEmptyHint: String { usage.claudeStatus.hint }
 
     private func limitRow(name: String, limits: Limits?, emptyHint: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {

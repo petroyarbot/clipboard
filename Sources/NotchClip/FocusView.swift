@@ -1,17 +1,11 @@
 import SwiftUI
 
-/// Локальное состояние поповера "Своё" (без макроса @State, который не ставится в CLT).
-@MainActor
-final class FocusViewState: ObservableObject {
-    @Published var showCustom = false
-}
-
 /// Панель таймера фокуса в стиле таймера из Apple Clock (оригинальная реализация).
 struct FocusView: View {
     @ObservedObject var timer: FocusTimer
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @StateObject private var viewState = FocusViewState()
 
+    /// Быстрые пресеты. Остальные значения задаются в настройках, вкладка "Фокус".
     private let presets = [25, 50, 5, 15]
     private let ringSize: CGFloat = 140
     private let ringWidth: CGFloat = 8
@@ -71,12 +65,6 @@ struct FocusView: View {
                     timer.setMinutes(minutes, for: .focus)
                 }
             }
-            chip("Своё", selected: !presets.contains(timer.focusMinutes)) {
-                viewState.showCustom = true
-            }
-            .popover(isPresented: $viewState.showCustom, arrowEdge: .bottom) {
-                customPopover
-            }
         }
         .frame(height: 22)
     }
@@ -93,25 +81,6 @@ struct FocusView: View {
                 )
         }
         .buttonStyle(.plain)
-    }
-
-    private var customPopover: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Длительность фокуса")
-                .font(.headline)
-            Stepper(
-                value: Binding(
-                    get: { timer.focusMinutes },
-                    set: { timer.setMinutes($0, for: .focus) }
-                ),
-                in: 1...180
-            ) {
-                Text("\(timer.focusMinutes) мин")
-                    .monospacedDigit()
-            }
-        }
-        .padding(14)
-        .frame(width: 220)
     }
 
     // MARK: - Кнопки

@@ -17,17 +17,30 @@ enum FocusState: Equatable {
     case paused
 }
 
+/// Завершение фазы по таймеру (не по пропуску). Нужно островку для баннера.
+struct FocusPhaseEnd: Equatable {
+    let id: UUID
+    let finished: FocusPhase
+    let next: FocusPhase
+    let nextMinutes: Int
+    let completedToday: Int
+}
+
 /// Помодоро-таймер. Время считается от `endDate` (а не декрементом), поэтому
 /// корректно переживает сон компьютера. Часы и побочные эффекты инжектируются.
 @MainActor
 final class FocusTimer: ObservableObject {
     static let sessionsPerCycle = 4
+    /// Звук в конце фазы. По умолчанию включён.
+    static let soundEnabledKey = "focusTimer.soundEnabled"
     private static let finishEpsilon: TimeInterval = 0.05
     private static let minMinutes = 1
     private static let maxMinutes = 180
 
     /// Обновляется раз в секунду, пока таймер идёт; заставляет SwiftUI перерисовываться.
     @Published private(set) var lastTick: Date
+    /// Ставится, когда фаза доходит до нуля. Пропуск фазы сюда не пишет.
+    @Published private(set) var lastPhaseEnd: FocusPhaseEnd?
     @Published private(set) var phase: FocusPhase = .focus
     @Published private(set) var state: FocusState = .idle
     /// Сколько фокус-сессий сделано в текущем цикле (0..<sessionsPerCycle).
@@ -44,6 +57,8 @@ final class FocusTimer: ObservableObject {
     private var endDate: Date?
     private var pausedRemaining: TimeInterval?
     private var ticker: Timer?
+    /// Сброс настроек пришёл во время фазы: длительности перечитаются на следующей фазе.
+    private var durationsPending = false
 
     private enum Key {
         static let focusMinutes = "focusTimer.focusMinutes"
@@ -134,6 +149,20 @@ final class FocusTimer: ObservableObject {
 
     // MARK: - Настройки
 
+    /// Перечитывает длительности из UserDefaults (после сброса настроек). В idle — сразу,
+    /// иначе — при переходе к следующей фазе, чтобы текущая фаза не сменила длительность на ходу.
+    func reloadDurations() {
+        guard state == .idle else { durationsPending = true; return }
+        loadDurations()
+    }
+
+    private func loadDurations() {
+        durationsPending = false
+        focusMinutes = FocusTimer.storedMinutes(defaults, Key.focusMinutes, fallback: 25)
+        shortBreakMinutes = FocusTimer.storedMinutes(defaults, Key.shortBreakMinutes, fallback: 5)
+        longBreakMinutes = FocusTimer.storedMinutes(defaults, Key.longBreakMinutes, fallback: 15)
+    }
+
     /// Меняет длительность фазы. Работает только в состоянии idle.
     func setMinutes(_ value: Int, for phase: FocusPhase) {
         guard state == .idle else { return }
@@ -192,6 +221,18 @@ final class FocusTimer: ObservableObject {
         endDate = nil
         pausedRemaining = nil
         state = .idle
+        if durationsPending { loadDurations() }
+    }
+
+    /// Добавляет время к текущей фазе (кнопка "+5 мин" на островке).
+    func addTime(_ seconds: TimeInterval) {
+        switch state {
+        case .idle: return
+        case .running:
+            if let endDate { self.endDate = endDate.addingTimeInterval(seconds) }
+        case .paused:
+            pausedRemaining = (pausedRemaining ?? 0) + seconds
+        }
     }
 
     /// Пропуск фазы: переход к следующей без звука и уведомления.
@@ -206,7 +247,14 @@ final class FocusTimer: ObservableObject {
         guard state == .running, remaining <= Self.finishEpsilon else { return }
         let finished = phase
         advancePhase(completed: true)
-        playSound()
+        lastPhaseEnd = FocusPhaseEnd(
+            id: UUID(),
+            finished: finished,
+            next: phase,
+            nextMinutes: minutes(for: phase),
+            completedToday: completedFocusCount
+        )
+        if defaults.object(forKey: Self.soundEnabledKey) as? Bool ?? true { playSound() }
         notify(endMessage(finished: finished))
     }
 
@@ -218,6 +266,7 @@ final class FocusTimer: ObservableObject {
         endDate = nil
         pausedRemaining = nil
         state = .idle
+        if durationsPending { loadDurations() }
 
         switch phase {
         case .focus:

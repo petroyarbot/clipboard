@@ -6,6 +6,12 @@ BIN="$(swift build -c release --arch arm64 --show-bin-path)/NotchClip"
 APP="${1:-$PWD/build/NotchClip.app}"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/NotchClip"
+# Agent hook scripts: the Settings window runs setup-agent-hooks.sh from here.
+HOOKS_DIR="$APP/Contents/Resources/agent-hooks"
+rm -rf "$HOOKS_DIR"
+mkdir -p "$HOOKS_DIR"
+cp scripts/agent-hooks/*.sh "$HOOKS_DIR/"
+chmod 755 "$HOOKS_DIR"/*.sh
 BUILD_NUM="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 if COMMIT="$(git rev-parse --short HEAD 2>/dev/null)"; then
   [ -n "$(git status --porcelain 2>/dev/null)" ] && COMMIT="$COMMIT-dirty"
