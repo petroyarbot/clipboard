@@ -5,6 +5,7 @@ enum PanelTab: String, CaseIterable, Equatable {
     case clipboard
     case focus
     case agents
+    case shelf
 
     static let storageKey = "panelTab"
 
@@ -13,6 +14,7 @@ enum PanelTab: String, CaseIterable, Equatable {
         case .clipboard: return "Буфер"
         case .focus: return "Фокус"
         case .agents: return "Агенты"
+        case .shelf: return "Полка"
         }
     }
 
@@ -21,6 +23,7 @@ enum PanelTab: String, CaseIterable, Equatable {
         case .clipboard: return "doc.on.clipboard"
         case .focus: return "timer"
         case .agents: return "sparkles"
+        case .shelf: return "tray.full"
         }
     }
 

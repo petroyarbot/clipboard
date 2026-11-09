@@ -53,6 +53,10 @@ final class FocusTimer: ObservableObject {
     @Published private(set) var shortBreakMinutes: Int
     @Published private(set) var longBreakMinutes: Int
 
+    var onFocusStart: ((Date) -> Void)?
+    var onFocusStop: (() -> Void)?
+    var onFocusCompleted: ((TimeInterval) -> Void)?
+
     private let defaults: UserDefaults
     private let clock: () -> Date
     private let playSound: () -> Void
@@ -212,11 +216,13 @@ final class FocusTimer: ObservableObject {
         endDate = clock().addingTimeInterval(duration(of: phase))
         pausedRemaining = nil
         state = .running
+        if phase == .focus, let endDate { onFocusStart?(endDate) }
         startTicker()
     }
 
     func pause() {
         guard state == .running else { return }
+        if phase == .focus { onFocusStop?() }
         pausedRemaining = remaining
         endDate = nil
         state = .paused
@@ -228,6 +234,7 @@ final class FocusTimer: ObservableObject {
         endDate = clock().addingTimeInterval(pausedRemaining ?? duration(of: phase))
         pausedRemaining = nil
         state = .running
+        if phase == .focus, let endDate { onFocusStart?(endDate) }
         startTicker()
     }
 
@@ -242,6 +249,7 @@ final class FocusTimer: ObservableObject {
 
     /// Кнопка "Отмена": сбрасывает текущую фазу без перехода к следующей.
     func reset() {
+        if phase == .focus && state == .running { onFocusStop?() }
         stopTicker()
         endDate = nil
         pausedRemaining = nil
@@ -263,6 +271,7 @@ final class FocusTimer: ObservableObject {
     /// Пропуск фазы: переход к следующей без звука и уведомления.
     /// Пропущенная фокус-сессия в дневной счётчик не попадает.
     func skip() {
+        if phase == .focus && state == .running { onFocusStop?() }
         advancePhase(completed: false)
     }
 
@@ -271,6 +280,10 @@ final class FocusTimer: ObservableObject {
         lastTick = clock()
         guard state == .running, remaining <= Self.finishEpsilon else { return }
         let finished = phase
+        if finished == .focus {
+            onFocusStop?()
+            onFocusCompleted?(duration(of: .focus))
+        }
         advancePhase(completed: true)
         lastPhaseEnd = FocusPhaseEnd(
             id: UUID(),

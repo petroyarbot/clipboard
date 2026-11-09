@@ -5,13 +5,16 @@ import Foundation
 enum SettingsMapping {
     /// Ключи UserDefaults, которые сбрасывает "Сбросить настройки". История, счётчики и вкладка не входят.
     static let resettableKeys: [String] = [
-        "hoverEnabled", "shortcut", "saveToDownloads",
+        "hoverEnabled", "shortcut", "thoughtShortcut", "saveToDownloads",
         "panelWidth", "panelHeight",
         "animationDuration", "animationBounce",
         "hoverOpenDelay", "hoverCloseDelay",
         "focusTimer.focusMinutes", "focusTimer.shortBreakMinutes", "focusTimer.longBreakMinutes",
         "focusTimer.soundEnabled", "focusTimer.focusSeconds",
-        "liveActivityFocus", "liveActivityAgents",
+        "liveActivityFocus", "liveActivityAgents", "liveActivityMusic",
+        "screenshotsToHistory", "screenshotsMoveEnabled", "recognizeImageText",
+        "focusShieldDND", "focusShieldSummary", "focusShieldApps", "focusShieldSites",
+        "focusShieldShortcutOn", "focusShieldShortcutOff", "shelfRetentionDays", "assistantVaultPath",
     ]
 
     /// Ключи прогресса и данных, которые сброс настроек не трогает.

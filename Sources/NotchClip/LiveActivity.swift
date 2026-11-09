@@ -53,6 +53,7 @@ final class IslandModel: ObservableObject {
     @Published var agent: IslandAgentSummary?
     @Published var banner: IslandBanner?
     @Published var released = 0
+    @Published var toast: String?
 
     func adoptGeometry(_ metrics: IslandMetrics) {
         if notchWidth != metrics.notchWidth { notchWidth = metrics.notchWidth }
@@ -74,9 +75,11 @@ final class LiveActivityController {
     var onOpen: ((PanelTab) -> Void)?
     /// Островок появился или скрылся (App по нему решает, нужен ли 25-мс опрос указателя).
     var onVisibilityChanged: (() -> Void)?
+    var focusSummary: String?
 
     let model = IslandModel()
     private let timer: FocusTimer
+    let music = NowPlayingMonitor()
     private let agents: AgentMonitor
     private let defaults: UserDefaults
     private var state = IslandState()
@@ -123,7 +126,11 @@ final class LiveActivityController {
 
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.sync() }
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.music.setActive(NowPlayingSettings.isEnabled(defaults: self.defaults))
+                self.sync()
+            }
             .store(in: &cancellables)
 
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
@@ -131,7 +138,19 @@ final class LiveActivityController {
             .sink { [weak self] _ in self?.screensChanged() }
             .store(in: &cancellables)
 
+        music.$status.receive(on: RunLoop.main).sink { [weak self] _ in self?.sync() }.store(in: &cancellables)
+        music.setActive(NowPlayingSettings.isEnabled(defaults: defaults))
         pinScreen()
+    }
+
+    /// App is quitting: stop the music helper so it does not outlive us.
+    func stop() {
+        music.setActive(false)
+    }
+
+    func showToast(_ text: String) {
+        state.showToast(text, at: Date().timeIntervalSince1970)
+        sync()
     }
 
     /// Полная панель открыта: островок прячется, потому что панель закрывает то же место.
@@ -181,7 +200,7 @@ final class LiveActivityController {
     func owns(_ point: NSPoint) -> Bool {
         guard panel?.isVisible == true, !panelOpen else { return false }
         switch model.presentation {
-        case .compactTimer, .compactBoth, .miniPlayer, .banner:
+        case .compactTimer, .compactBoth, .miniPlayer, .banner, .compactMusic, .musicPlayer, .toast:
             return islandRect().contains(point)
         case .idle, .compactAgent:
             return false
@@ -195,8 +214,8 @@ final class LiveActivityController {
     private var canExpand: Bool {
         guard !panelOpen, panel?.isVisible == true else { return false }
         switch model.presentation {
-        case .compactTimer, .compactBoth, .miniPlayer: return true
-        case .idle, .compactAgent, .banner: return false
+        case .compactTimer, .compactBoth, .miniPlayer, .compactMusic, .musicPlayer: return true
+        case .idle, .compactAgent, .banner, .toast: return false
         }
     }
 
@@ -210,6 +229,8 @@ final class LiveActivityController {
                 completedToday: end.completedToday,
                 at: Date().timeIntervalSince1970
             )
+            state.setBannerSummary(end.finished == .focus ? focusSummary : nil)
+            focusSummary = nil
         }
         let quiet = isQuiet
         if quiet != wasQuiet {
@@ -256,9 +277,12 @@ final class LiveActivityController {
             needsActionCount: model.agent?.count ?? 0,
             hovering: hovering,
             focusEnabled: IslandSettings.isEnabled(IslandSettings.focusKey, defaults: defaults),
-            agentsEnabled: IslandSettings.isEnabled(IslandSettings.agentsKey, defaults: defaults)
+            agentsEnabled: IslandSettings.isEnabled(IslandSettings.agentsKey, defaults: defaults),
+            musicEnabled: NowPlayingSettings.isEnabled(defaults: defaults),
+            musicPlaying: music.status == .playing
         )
         let next = state.presentation(inputs, now: now)
+        model.toast = state.toast?.text
         if model.banner != state.banner { model.banner = state.banner }
         if model.released != state.releasedAgentDone { model.released = state.releasedAgentDone }
         scheduleExpiry(now: now)
@@ -365,8 +389,8 @@ final class LiveActivityController {
 
     private static func isCompact(_ presentation: IslandPresentation) -> Bool {
         switch presentation {
-        case .compactTimer, .compactAgent, .compactBoth: return true
-        case .idle, .miniPlayer, .banner: return false
+        case .compactTimer, .compactAgent, .compactBoth, .compactMusic: return true
+        case .idle, .miniPlayer, .musicPlayer, .banner, .toast: return false
         }
     }
 
@@ -385,7 +409,7 @@ final class LiveActivityController {
     private func scheduleExpiry(now: TimeInterval) {
         expiryWork?.cancel()
         expiryWork = nil
-        guard let expiry = state.bannerExpiry, expiry > now else { return }
+        guard let expiry = [state.bannerExpiry, state.toastExpiry].compactMap({ $0 }).filter({ $0 > now }).min() else { return }
         let work = DispatchWorkItem { [weak self] in self?.sync() }
         expiryWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + (expiry - now) + 0.01, execute: work)
@@ -437,6 +461,7 @@ final class LiveActivityController {
         let root = LiveIslandView(
             model: model,
             timer: timer,
+            music: music,
             onTap: { [weak self] in self?.tapped() },
             onStartNext: { [weak self] in self?.startNext() }
         )

@@ -4,6 +4,7 @@ import SwiftUI
 struct LiveIslandView: View {
     @ObservedObject var model: IslandModel
     @ObservedObject var timer: FocusTimer
+    @ObservedObject var music: NowPlayingMonitor
     var onTap: () -> Void
     var onStartNext: () -> Void
 
@@ -18,6 +19,12 @@ struct LiveIslandView: View {
                 .modifier(IslandReveal(visible: isCompact))
             mini
                 .modifier(IslandReveal(visible: model.presentation == .miniPlayer))
+            NowPlayingMiniView(monitor: music, contentTop: model.layout.contentTop)
+                .modifier(IslandReveal(visible: model.presentation == .musicPlayer))
+            Text(model.toast ?? "").font(.system(size: 14, weight: .semibold))
+                .padding(.top, model.layout.contentTop)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .modifier(IslandReveal(visible: model.presentation == .toast))
             banner
                 .modifier(IslandReveal(visible: model.presentation == .banner))
         }
@@ -36,7 +43,7 @@ struct LiveIslandView: View {
     // MARK: - Что показываем
 
     private var isCompact: Bool {
-        model.presentation == .compactTimer || model.presentation == .compactAgent || model.presentation == .compactBoth
+        model.presentation == .compactTimer || model.presentation == .compactAgent || model.presentation == .compactBoth || model.presentation == .compactMusic
     }
 
     /// "4:44" до часа, "1:02:05" от часа (форматирует `FocusTimer.compactText`).
@@ -67,7 +74,9 @@ struct LiveIslandView: View {
     }
 
     @ViewBuilder private var leftWing: some View {
-        if showsTimer {
+        if model.presentation == .compactMusic {
+            NowPlayingCompactLeading(monitor: music)
+        } else if showsTimer {
             HStack(spacing: 5) {
                 ring(size: 15, line: 2.2)
                 if showsAgent {
@@ -91,7 +100,9 @@ struct LiveIslandView: View {
     }
 
     @ViewBuilder private var rightWing: some View {
-        if showsAgent, let agent = model.agent {
+        if model.presentation == .compactMusic {
+            NowPlayingCompactTrailing(monitor: music)
+        } else if showsAgent, let agent = model.agent {
             HStack(spacing: 4) {
                 if showsTimer { badge(agent.source) }
                 PulseDot()
@@ -135,7 +146,7 @@ struct LiveIslandView: View {
 
     private func badge(_ source: String) -> some View {
         let codex = source == "codex"
-        return Text(codex ? "CX" : "CL")
+        return Text(source == "assistant" ? "AI" : (codex ? "CX" : "CL"))
             .font(.system(size: 8.5, weight: .bold))
             .foregroundStyle(codex ? Color.black : Color.white)
             .padding(.horizontal, 4)

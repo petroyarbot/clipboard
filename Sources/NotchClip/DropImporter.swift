@@ -68,3 +68,43 @@ import SwiftUI
     }
     override func concludeDragOperation(_ sender: NSDraggingInfo?) { delegate?.dropTargeted = false }
 }
+
+/// Passive drop surface over the closed notch. It does not activate the app.
+@MainActor final class ShelfDropView: NSView {
+    weak var delegate: AppDelegate?
+    init(delegate: AppDelegate) {
+        self.delegate = delegate
+        super.init(frame: .zero)
+        registerForDraggedTypes(DropImporter.dragTypes)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { .copy }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let delegate else { return false }
+        defer { delegate.scheduleShelfDropHide() }
+        let board = sender.draggingPasteboard
+        let urls = (board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+        if !urls.isEmpty {
+            Task { @MainActor in
+                let items = await delegate.shelf.add(urls: urls)
+                if !items.isEmpty { delegate.liveActivity?.showToast("На полке: \(items.count)") }
+            }
+            return true
+        }
+        if let image = PasteboardImages.rawCandidates(from: board).lazy.compactMap(PasteboardImages.png(from:)).first {
+            Task { @MainActor in
+                if await delegate.shelf.add(data: image, named: "Изображение.png") != nil {
+                    delegate.liveActivity?.showToast("На полке: 1")
+                }
+            }
+            return true
+        }
+        if let text = board.string(forType: .string), !text.isEmpty {
+            Task { @MainActor in
+                if await delegate.shelf.addText(text) != nil { delegate.liveActivity?.showToast("На полке: 1") }
+            }
+            return true
+        }
+        return false
+    }
+}

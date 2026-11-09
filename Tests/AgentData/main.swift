@@ -48,7 +48,7 @@ let claudeExpired = data("""
 {"five_hour":{"used_percentage":80,"resets_at":\(pastEpoch)},"seven_day":{"used_percentage":30,"resets_at":\(futureEpoch)},"updated_at":\(nowEpoch)}
 """)
 if let limits = UsageParser.claudeLimits(from: claudeExpired, now: now) {
-    check(limits.fiveHourLeft == nil, "expired claude 5h window has no percent")
+    check(limits.fiveHourLeft == 100, "expired claude 5h window resets")
     check(limits.fiveHourReset == nil, "expired claude 5h window has unknown reset")
     check(limits.weekLeft == 70, "live claude week window is kept when 5h expired")
 } else {
@@ -108,7 +108,7 @@ check(codexLatest?.updatedAt == UsageParser.parseDate("2026-11-09T08:00:00.000Z"
 
 let codexExpiredLine = codexLine(timestamp: "2026-11-09T09:00:00.000Z", limitId: "codex", primaryUsed: 55, secondaryUsed: 60, resets: pastEpoch, weekResets: futureEpoch)
 let codexExpired = UsageParser.newestCodexLimits(in: [codexExpiredLine], now: now)
-check(codexExpired?.fiveHourLeft == nil, "expired codex 5h window has no percent")
+check(codexExpired?.fiveHourLeft == 100, "expired codex 5h window resets")
 check(codexExpired?.fiveHourReset == nil, "expired codex 5h window has unknown reset")
 check(codexExpired?.weekLeft == 40, "live codex week window keeps its value")
 
@@ -410,6 +410,105 @@ check(kept.resolve(file: newerFile) == newerFile, "newer status line file wins o
 check(kept.resolve(file: olderFile) == parsedAPI, "older status line file is ignored when the API has data")
 check(ClaudeApiState().resolve(file: olderFile) == olderFile, "status line file is used when the API never succeeded")
 check(ClaudeApiState().resolve(file: nil) == nil, "no API and no file means no Claude data")
+
+// MARK: - Codex live source (fake process runner, no real codex calls)
+
+final class FakeCodexRunner: CodexProcessRunning {
+    let output: Data?
+    private(set) var calls = 0
+    private(set) var lastTimeout: TimeInterval?
+    init(output: Data?) { self.output = output }
+    func run(executable: URL, timeout: TimeInterval) -> Data? {
+        calls += 1
+        lastTimeout = timeout
+        return output
+    }
+}
+
+func limitsOf(_ result: CodexFetchResult) -> Limits? {
+    if case .success(let limits) = result { return limits }
+    return nil
+}
+
+func isUnavailable(_ result: CodexFetchResult) -> Bool {
+    if case .unavailable = result { return true }
+    return false
+}
+
+let liveResponse = data("""
+{"id":2,"jsonrpc":"2.0","result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":90,"windowDurationMins":300,"resetsAt":\(futureEpoch)},"secondary":{"usedPercent":90,"windowDurationMins":10080,"resetsAt":\(futureEpoch)}},"rateLimitsByLimitId":{"codex":{"limitId":"codex","primary":{"usedPercent":2,"windowDurationMins":300,"resetsAt":\(futureEpoch)},"secondary":{"usedPercent":52,"windowDurationMins":10080,"resetsAt":\(futureEpoch + 86400)}},"premium":{"limitId":"premium","primary":{"usedPercent":99,"windowDurationMins":300,"resetsAt":\(futureEpoch)}}}}}
+""")
+if let live = CodexUsageClient.parse(liveResponse, now: now) {
+    check(live.fiveHourLeft == 98, "live response uses the codex bucket, not rateLimits or premium (5h left 98)")
+    check(live.weekLeft == 48, "live secondary window is the weekly limit (week left 48)")
+    check(live.fiveHourReset?.timeIntervalSince1970 == Double(futureEpoch), "live 5h reset parsed from resetsAt")
+    check(live.updatedAt == now, "live result is stamped with the fetch time")
+} else {
+    check(false, "live response parses")
+}
+
+let liveSingleBucket = data("""
+{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":40,"windowDurationMins":300,"resetsAt":\(futureEpoch)},"secondary":null}}}
+""")
+check(CodexUsageClient.parse(liveSingleBucket, now: now)?.fiveHourLeft == 60, "live response without buckets falls back to rateLimits")
+
+let liveExpired = data("""
+{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":70,"windowDurationMins":300,"resetsAt":\(pastEpoch)},"secondary":{"usedPercent":30,"windowDurationMins":10080,"resetsAt":\(futureEpoch)}}}}
+""")
+if let expired = CodexUsageClient.parse(liveExpired, now: now)?.expiring(at: now) {
+    check(expired.fiveHourLeft == 100 && expired.fiveHourReset == nil, "expired live 5h window shows 100% left and unknown reset")
+    check(expired.weekLeft == 70, "live week window keeps its value when 5h expired")
+} else {
+    check(false, "live response with an expired window parses")
+}
+
+check(CodexUsageClient.parse(data(#"{"id":2,"error":{"code":-32000,"message":"not logged in"}}"#), now: now) == nil, "JSON-RPC error yields no limits")
+check(CodexUsageClient.parse(data(#"{"id":7,"result":{"rateLimits":{"primary":{"usedPercent":1,"windowDurationMins":300}}}}"#), now: now) == nil, "response with another id is ignored")
+check(CodexUsageClient.parse(data(#"{"id":2,"result":{"rateLimits":{"primary":null,"secondary":null}}}"#), now: now) == nil, "response without windows yields no limits")
+check(CodexUsageClient.parse(data("not json"), now: now) == nil, "garbage response yields no limits")
+
+let runnerMissing = FakeCodexRunner(output: liveResponse)
+let missingResult = CodexUsageClient(runner: runnerMissing, locate: { nil }).fetch(now: now)
+check(isUnavailable(missingResult) && runnerMissing.calls == 0, "no codex binary means unavailable without running anything")
+
+let runnerOK = FakeCodexRunner(output: liveResponse)
+let okResult = CodexUsageClient(runner: runnerOK, locate: { URL(fileURLWithPath: "/fake/codex") }).fetch(now: now)
+check(limitsOf(okResult)?.fiveHourLeft == 98 && runnerOK.lastTimeout == 15, "fetch returns parsed limits and uses a 15 s timeout")
+
+let runnerSilent = FakeCodexRunner(output: nil)
+let silentResult = CodexUsageClient(runner: runnerSilent, locate: { URL(fileURLWithPath: "/fake/codex") }).fetch(now: now)
+check(isUnavailable(silentResult), "no answer from the app-server is unavailable")
+
+// Binary lookup: newest numeric sdk-cache version that has the binary wins; folders without it are skipped.
+let fakeHome = root.appendingPathComponent("fake-home", isDirectory: true)
+let cacheRoot = fakeHome.appendingPathComponent("Library/Application Support/Code/agent-host/sdk-cache/codex", isDirectory: true)
+let binarySuffix = "darwin-arm64/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex"
+for version in ["0.9.0", "0.163.0", "0.100.0"] {
+    let binary = cacheRoot.appendingPathComponent("\(version)/\(binarySuffix)")
+    try fm.createDirectory(at: binary.deletingLastPathComponent(), withIntermediateDirectories: true)
+    _ = fm.createFile(atPath: binary.path, contents: Data("#!/bin/sh\n".utf8), attributes: [.posixPermissions: 0o755])
+}
+try fm.createDirectory(at: cacheRoot.appendingPathComponent("0.200.0"), withIntermediateDirectories: true)
+check(CodexUsageClient.findExecutable(home: fakeHome)?.path.contains("/0.163.0/") == true, "sdk-cache picks the newest version that has the binary")
+
+// Freshest source: a live result is stamped with the fetch time, a jsonl entry with its own timestamp.
+let fileOlder = Limits(fiveHourLeft: 10, fiveHourReset: nil, weekLeft: 10, weekReset: nil, updatedAt: now.addingTimeInterval(-600))
+let fileNewer = Limits(fiveHourLeft: 20, fiveHourReset: nil, weekLeft: 20, weekReset: nil, updatedAt: now.addingTimeInterval(60))
+var liveState = CodexApiState()
+liveState.apply(okResult, now: now)
+check(liveState.resolve(file: fileOlder) == limitsOf(okResult), "freshest source: live result beats an older jsonl entry")
+check(liveState.resolve(file: fileNewer) == fileNewer, "freshest source: a newer jsonl entry beats the live result")
+check(liveState.status == nil, "successful live fetch reports no status")
+
+// Fallback: a failed live fetch keeps no stale live value and uses the jsonl entry, with a short Russian status.
+var downState = CodexApiState()
+downState.apply(.unavailable("Codex CLI не найден — данные из журнала"), now: now)
+check(downState.resolve(file: fileOlder) == fileOlder, "failed live fetch falls back to the jsonl entry")
+check(downState.resolve(file: nil) == nil, "failed live fetch with no jsonl entry means no codex limits")
+check(downState.status == "Codex CLI не найден — данные из журнала", "failed live fetch exposes the fallback status")
+liveState.apply(.unavailable("Codex недоступен — данные из журнала"), now: now.addingTimeInterval(300))
+check(liveState.resolve(file: nil) == nil, "a later failure drops the previous live value")
+check(liveState.nextFetch == now.addingTimeInterval(600), "next live fetch is due five minutes after the last attempt")
 
 try? fm.removeItem(at: root)
 

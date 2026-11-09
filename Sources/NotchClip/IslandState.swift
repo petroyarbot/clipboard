@@ -8,6 +8,9 @@ enum IslandPresentation: Equatable {
     case compactAgent
     case compactBoth
     case miniPlayer
+    case compactMusic
+    case musicPlayer
+    case toast
     case banner
 }
 
@@ -19,6 +22,8 @@ struct IslandInputs: Equatable {
     var hovering = false
     var focusEnabled = true
     var agentsEnabled = true
+    var musicEnabled = true
+    var musicPlaying = false
 }
 
 /// Баннер окончания фазы.
@@ -29,6 +34,7 @@ struct IslandBanner: Equatable {
     let completedToday: Int
     let agentsDone: Int
     let startedAt: TimeInterval
+    var summary: String? = nil
 }
 
 /// Размер чёрной формы. `contentTop` — где начинается содержимое под вырезом.
@@ -63,6 +69,11 @@ enum IslandSettings {
 }
 
 /// Чистый редьюсер островка: без AppKit и без таймеров. Время передаётся числом (секунды).
+struct IslandToast: Equatable {
+    let text: String
+    let startedAt: TimeInterval
+}
+
 struct IslandState: Equatable {
     static let bannerDuration: TimeInterval = 4
     /// Минимальная ширина крыла; реальная считается по содержимому (`compactWingWidth`).
@@ -77,6 +88,7 @@ struct IslandState: Equatable {
     static let bannerSize = CGSize(width: 460, height: 104)
     static let minimumNotchHeight: CGFloat = 32
 
+    private(set) var toast: IslandToast?
     private(set) var banner: IslandBanner?
     /// "готово" от агентов, пришедшие во время фокуса. Уходят в баннер при окончании фазы.
     private(set) var queuedAgentDone = 0
@@ -117,6 +129,7 @@ struct IslandState: Equatable {
         releasedAgentDone = 0
     }
 
+    mutating func setBannerSummary(_ summary: String?) { banner?.summary = summary }
     mutating func dismissBanner() { banner = nil }
 
     /// Момент, когда баннер гаснет (для одного отложенного пересчёта).
@@ -124,32 +137,33 @@ struct IslandState: Equatable {
         banner.map { $0.startedAt + Self.bannerDuration }
     }
 
-    /// Приоритет: баннер окончания > needsAction > таймер > ничего.
+    mutating func showToast(_ text: String, at now: TimeInterval) { toast = IslandToast(text: text, startedAt: now) }
+    var toastExpiry: TimeInterval? { toast.map { $0.startedAt + 2.5 } }
+
+    /// Приоритет: баннер окончания > needsAction > уведомление > таймер > музыка.
     func presentation(_ inputs: IslandInputs, now: TimeInterval) -> IslandPresentation {
         if inputs.focusEnabled, let banner {
             let age = now - banner.startedAt
             if age >= 0 && age < Self.bannerDuration { return .banner }
         }
         let agent = inputs.agentsEnabled && inputs.needsActionCount > 0
-        let timer = inputs.focusEnabled && inputs.timer != .idle
-        switch (timer, agent) {
-        case (true, true): return inputs.hovering ? .miniPlayer : .compactBoth
-        case (true, false): return inputs.hovering ? .miniPlayer : .compactTimer
-        case (false, true): return .compactAgent
-        case (false, false): return .idle
-        }
+        if agent { return .compactAgent }
+        if let toast, now >= toast.startedAt, now < toast.startedAt + 2.5 { return .toast }
+        if inputs.focusEnabled && inputs.timer != .idle { return inputs.hovering ? .miniPlayer : .compactTimer }
+        if inputs.musicEnabled && inputs.musicPlaying { return inputs.hovering ? .musicPlayer : .compactMusic }
+        return .idle
     }
 
     static func layout(for presentation: IslandPresentation, notchWidth: CGFloat, notchHeight: CGFloat, wings: CompactWings = CompactWings()) -> IslandLayout? {
         switch presentation {
         case .idle:
             return nil
-        case .compactTimer, .compactAgent, .compactBoth:
+        case .compactTimer, .compactAgent, .compactBoth, .compactMusic:
             let wing = compactWingWidth(wings)
             return IslandLayout(width: notchWidth + 2 * wing, height: notchHeight, bottomRadius: 12, contentTop: 0, wing: wing)
-        case .miniPlayer:
+        case .miniPlayer, .musicPlayer:
             return IslandLayout(width: miniSize.width, height: miniSize.height, bottomRadius: 30, contentTop: notchHeight)
-        case .banner:
+        case .banner, .toast:
             return IslandLayout(width: bannerSize.width, height: bannerSize.height, bottomRadius: 22, contentTop: notchHeight)
         }
     }
@@ -223,6 +237,7 @@ struct IslandState: Equatable {
     static func bannerSubtitle(_ banner: IslandBanner) -> String {
         var parts = ["Сегодня: \(banner.completedToday)", "дальше: \(phaseName(banner.next)) \(banner.nextMinutes) мин"]
         if banner.agentsDone > 0 { parts.append(agentsFinishedText(banner.agentsDone)) }
+        if let summary = banner.summary, !summary.isEmpty { parts.append(summary) }
         return parts.joined(separator: " · ")
     }
 

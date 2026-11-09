@@ -1,11 +1,26 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-swift build -c release --arch arm64
-BIN="$(swift build -c release --arch arm64 --show-bin-path)/NotchClip"
+SPM_ARGS=()
+if [[ "${NOTCHCLIP_NO_SPM_SANDBOX:-0}" == 1 ]]; then
+  SPM_ARGS+=(--disable-sandbox -debug-info-format none --scratch-path "${NOTCHCLIP_SPM_SCRATCH:-/tmp/claude-501/nc-app-build}")
+fi
+swift build "${SPM_ARGS[@]}" -c release --arch arm64
+BIN="$(swift build "${SPM_ARGS[@]}" -c release --arch arm64 --show-bin-path)/NotchClip"
 APP="${1:-$PWD/build/NotchClip.app}"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/NotchClip"
+# Build the helper from the same source used by the development fallback.
+mkdir -p "$APP/Contents/Resources"
+HELPER_SOURCE="$(mktemp "${TMPDIR:-/tmp}/notchclip-nowplaying.XXXXXX.m")"
+trap 'rm -f "$HELPER_SOURCE"' EXIT
+python3 - "$HELPER_SOURCE" <<'PYHELPER'
+import pathlib, sys
+source = pathlib.Path('Sources/NotchClip/NowPlaying.swift').read_text()
+source = source.split('static let source = #"""', 1)[1].split('"""#', 1)[0]
+pathlib.Path(sys.argv[1]).write_text(source)
+PYHELPER
+clang -dynamiclib -fobjc-arc -arch arm64 -mmacosx-version-min=13.0 -framework Foundation -o "$APP/Contents/Resources/nowplaying.dylib" "$HELPER_SOURCE"
 # Agent hook scripts: the Settings window runs setup-agent-hooks.sh from here.
 HOOKS_DIR="$APP/Contents/Resources/agent-hooks"
 rm -rf "$HOOKS_DIR"
@@ -39,10 +54,12 @@ SIGN_IDENTITY="NotchClip Local Signing"
 SIGN_OUT="$(security find-identity -v -p codesigning)"
 case "$SIGN_OUT" in
   *"$SIGN_IDENTITY"*)
+    codesign --force --sign "$SIGN_IDENTITY" "$APP/Contents/Resources/nowplaying.dylib"
     codesign --force --deep --sign "$SIGN_IDENTITY" --identifier app.notchclip.mac "$APP"
     echo "Подпись: «${SIGN_IDENTITY}» (стабильная, разрешения macOS сохраняются)."
     ;;
   *)
+    codesign --force --sign - "$APP/Contents/Resources/nowplaying.dylib"
     codesign --force --sign - "$APP"
     echo "Подпись: ad-hoc (временная)."
     echo "Подпись временная — разрешения macOS будут слетать после обновлений. Запусти ./scripts/setup-signing.sh"

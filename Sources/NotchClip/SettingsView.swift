@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import ServiceManagement
+import ApplicationServices
 
 /// Окно настроек (scene `Settings`): пять вкладок. Ключи UserDefaults те же, что и раньше.
 struct SettingsView: View {
@@ -17,7 +18,7 @@ struct SettingsView: View {
                 .tabItem { Label("Панель", systemImage: "rectangle.topthird.inset.filled") }
             BufferSettingsTab(store: store)
                 .tabItem { Label("Буфер", systemImage: "doc.on.clipboard") }
-            FocusSettingsTab(timer: timer)
+            FocusSettingsTab(timer: timer, shield: delegate.focusShield)
                 .tabItem { Label("Фокус", systemImage: "timer") }
             AgentsSettingsTab(usage: usage)
                 .tabItem { Label("Агенты", systemImage: "sparkles") }
@@ -32,6 +33,7 @@ private struct GeneralSettingsTab: View {
     @ObservedObject var delegate: AppDelegate
     @AppStorage("hoverEnabled") private var hoverEnabled = true
     @AppStorage("shortcut") private var shortcut = 0
+    @AppStorage("thoughtShortcut") private var thoughtShortcut = 0
     @AppStorage("hoverOpenDelay") private var openDelay = 0.0
     @AppStorage("hoverCloseDelay") private var closeDelay = 0.30
     @StateObject private var state = GeneralTabState()
@@ -57,6 +59,11 @@ private struct GeneralSettingsTab: View {
                     Text("⌘ ⇧ Space").tag(2)
                 }
                 .onChange(of: shortcut) { _ in delegate.registerShortcut() }
+                Picker("Быстрая мысль", selection: $thoughtShortcut) {
+                    Text("⌥ Space").tag(0)
+                    Text("⌃ ⌥ Space").tag(1)
+                    Text("⌘ ⇧ T").tag(2)
+                }.onChange(of: thoughtShortcut) { _ in delegate.registerThoughtShortcut() }
             } header: {
                 Text("Запуск")
             }
@@ -159,6 +166,8 @@ private struct PanelSettingsTab: View {
     @AppStorage("animationBounce") private var animationBounce = 0.12
     @AppStorage(IslandSettings.focusKey) private var liveFocus = true
     @AppStorage(IslandSettings.agentsKey) private var liveAgents = true
+    @AppStorage("liveActivityMusic") private var liveMusic = true
+    @AppStorage("shelfRetentionDays") private var shelfDays = 7
     @StateObject private var state = PanelTabState()
 
     var body: some View {
@@ -214,6 +223,8 @@ private struct PanelSettingsTab: View {
             Section {
                 Toggle("Таймер в чёлке", isOn: $liveFocus)
                 Toggle("Агенты в чёлке", isOn: $liveAgents)
+                Toggle("Музыка в чёлке", isOn: $liveMusic)
+                Stepper("Полка: хранить \(shelfDays) дн.", value: $shelfDays, in: 1...365)
             } header: {
                 Text("Живая активность")
             }
@@ -254,12 +265,18 @@ private struct PanelSettingsTab: View {
 private struct BufferSettingsTab: View {
     @ObservedObject var store: ClipboardStore
     @AppStorage(ClipboardStore.downloadsKey) private var saveToDownloads = true
+    @AppStorage("screenshotsToHistory") private var screenshotsToHistory = true
+    @AppStorage("screenshotsMoveEnabled") private var screenshotsMove = true
+    @AppStorage("recognizeImageText") private var recognizeText = true
     @StateObject private var state = BufferTabState()
 
     var body: some View {
         Form {
             Section {
                 Toggle("Сохранять фото и файлы в Загрузки", isOn: $saveToDownloads)
+                Toggle("Скриншоты в историю", isOn: $screenshotsToHistory)
+                Toggle("Перемещать скриншоты", isOn: $screenshotsMove)
+                Toggle("Распознавать текст", isOn: $recognizeText)
             }
             Section {
                 HStack {
@@ -295,7 +312,11 @@ private struct BufferSettingsTab: View {
 
 private struct FocusSettingsTab: View {
     @ObservedObject var timer: FocusTimer
+    @ObservedObject var shield: FocusShield
+    @StateObject private var shieldUI = ShieldSettingsState()
     @AppStorage(FocusTimer.soundEnabledKey) private var sound = true
+    @AppStorage("focusShieldDND") private var shieldDND = true
+    @AppStorage("focusShieldSummary") private var shieldSummary = true
 
     var body: some View {
         Form {
@@ -312,8 +333,49 @@ private struct FocusSettingsTab: View {
             Section {
                 Toggle("Звук в конце фазы", isOn: $sound)
             }
+            Section("Щит фокуса") {
+                Toggle("Не беспокоить", isOn: $shieldDND)
+                Text("Создай в Быстрых командах «NotchClip Фокус вкл» и «NotchClip Фокус выкл» для включения и выключения режима «Не беспокоить».").font(.caption).foregroundStyle(.secondary)
+                Button("Открыть Быстрые команды") { NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/System/Applications/Shortcuts.app"), configuration: NSWorkspace.OpenConfiguration()) }
+                Text(shield.dndStatus ?? "Статус команд проверяется при запуске фокуса").font(.caption).foregroundStyle(.secondary)
+                Toggle("Сводка сообщений на перерыве", isOn: $shieldSummary)
+                HStack {
+                    Text(AXIsProcessTrusted() ? "Универсальный доступ: разрешён" : "Универсальный доступ: не разрешён")
+                    Button("Разрешить") { shield.enableSummaryAccess() }
+                }
+                Menu("Добавить приложение") {
+                    ForEach(NSWorkspace.shared.runningApplications.filter { $0.bundleIdentifier != nil && $0.activationPolicy == .regular }, id: \.processIdentifier) { app in
+                        Button(app.localizedName ?? app.bundleIdentifier ?? "") { addBlockedApp(app.bundleIdentifier ?? "") }
+                    }
+                }
+                ForEach(shieldUI.apps, id: \.self) { app in
+                    HStack { Text(app); Spacer(); Button("Удалить") { shieldUI.apps.removeAll { $0 == app }; saveShieldLists() } }
+                }
+                HStack {
+                    TextField("Домен сайта", text: $shieldUI.site)
+                    Button("Добавить") {
+                        if let domain = FocusShieldRules.normalizeDomain(shieldUI.site), !shieldUI.sites.contains(domain) { shieldUI.sites.append(domain); saveShieldLists() }
+                        shieldUI.site = ""
+                    }
+                }
+                ForEach(shieldUI.sites, id: \.self) { site in
+                    HStack { Text(site); Spacer(); Button("Удалить") { shieldUI.sites.removeAll { $0 == site }; saveShieldLists() } }
+                }
+            }
         }
         .formStyle(.grouped)
+        .onAppear {
+            shieldUI.apps = FocusShieldSettings.apps(.standard)
+            shieldUI.sites = FocusShieldSettings.sites(.standard)
+        }
+    }
+    private func addBlockedApp(_ app: String) {
+        guard !app.isEmpty, !shieldUI.apps.contains(app) else { return }
+        shieldUI.apps.append(app); saveShieldLists()
+    }
+    private func saveShieldLists() {
+        UserDefaults.standard.set(shieldUI.apps, forKey: FocusShieldSettings.appsKey)
+        UserDefaults.standard.set(shieldUI.sites, forKey: FocusShieldSettings.sitesKey)
     }
 
     private func minuteStepper(_ title: String, phase: FocusPhase) -> some View {
@@ -338,10 +400,21 @@ struct ScriptOutput: Identifiable {
 
 private struct AgentsSettingsTab: View {
     @ObservedObject var usage: UsageMonitor
+    @AppStorage("assistantVaultPath") private var vaultPath = ""
     @StateObject private var state = AgentsTabState()
 
     var body: some View {
         Form {
+            Section("Ассистент") {
+                LabeledContent("Хранилище") { Text(vaultPath.isEmpty ? ThoughtCapture.defaultVaultPath : vaultPath).lineLimit(1) }
+                Button("Выбрать папку…") {
+                    let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
+                    if panel.runModal() == .OK, let url = panel.url { vaultPath = url.path }
+                }
+                LabeledContent("Claude CLI") {
+                    Text(state.claudeExecutableFound ? "Найден" : "Не найден")
+                }
+            }
             Section {
                 LabeledContent("Claude Code") {
                     Text(state.claudeHooks ? "Установлены" : "Не установлены").foregroundStyle(state.claudeHooks ? .green : .secondary)
@@ -375,7 +448,10 @@ private struct AgentsSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-        .onAppear { refreshStatus() }
+        .onAppear {
+            refreshStatus()
+            state.claudeExecutableFound = (try? ThoughtProcessor(vault: URL(fileURLWithPath: "/"), dataDirectory: NotchClipDataLocation.directory).resolveExecutable()) != nil
+        }
         .sheet(item: $state.output) { item in
             HookOutputSheet(item: item)
         }
@@ -498,8 +574,15 @@ private struct HookOutputSheet: View {
 }
 
 @MainActor final class AgentsTabState: ObservableObject {
+    @Published var claudeExecutableFound = false
     @Published var claudeHooks = false
     @Published var codexHooks = false
     @Published var output: ScriptOutput?
     @Published var running = false
+}
+
+@MainActor final class ShieldSettingsState: ObservableObject {
+    @Published var apps: [String] = []
+    @Published var sites: [String] = []
+    @Published var site = ""
 }

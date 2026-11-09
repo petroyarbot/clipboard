@@ -25,7 +25,7 @@ struct AgentsView: View {
                 .foregroundStyle(.white.opacity(0.6))
             limitRow(name: "Claude", limits: usage.snapshot.claude,
                      emptyHint: claudeEmptyHint)
-            limitRow(name: "Codex", limits: usage.snapshot.codex, emptyHint: "Нет данных")
+            limitRow(name: "Codex", limits: usage.snapshot.codex, emptyHint: usage.codexStatus ?? "Нет данных")
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -78,7 +78,7 @@ struct AgentsView: View {
                     .padding(.top, 2)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text(task.project.isEmpty ? "Без проекта" : task.project)
+                        Text(task.source == "assistant" ? "Второй мозг" : (task.project.isEmpty ? "Без проекта" : task.project))
                             .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
                         statePill(task.state)
@@ -142,6 +142,7 @@ struct AgentsView: View {
 
     static func sourceName(_ source: String) -> String {
         switch source {
+        case "assistant": return "AI"
         case "claude": return "Claude"
         case "codex": return "Codex"
         default: return source
@@ -216,6 +217,7 @@ struct LimitBar: View {
 
     /// "сброс 14:20" сегодня, "сброс пт 23:42" в пределах недели, иначе "сброс 3.12 09:00".
     static func resetText(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+        if date <= now { return "сброшен" }
         if calendar.isDate(date, inSameDayAs: now) {
             return "сброс " + timeFormatter.string(from: date)
         }

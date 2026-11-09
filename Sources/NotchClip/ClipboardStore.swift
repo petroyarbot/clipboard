@@ -232,6 +232,13 @@ private struct PromiseTimeout: Error {}
             importFiles(from: pasteboard, dropped: false)
         }
     }
+    func importImageFile(_ url: URL) {
+        let generation = importGeneration
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let data = try? Data(contentsOf: url) else { return }
+            DispatchQueue.main.async { self?.addImage([data], generation: generation) }
+        }
+    }
     func importFileSynchronously(_ url: URL) throws {
         guard canSave else { throw NSError(domain: "NotchClip", code: 2, userInfo: [NSLocalizedDescriptionKey: "Историю нельзя сохранить."]) }
         let clip = try FileVault.copy(url, into: filesDirectory)

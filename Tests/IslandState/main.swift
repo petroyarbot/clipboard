@@ -31,10 +31,10 @@ check(fresh.presentation(inputs(), now: now) == .idle, "nothing active shows idl
 check(fresh.presentation(inputs(.running), now: now) == .compactTimer, "running timer shows compact timer")
 check(fresh.presentation(inputs(.paused), now: now) == .compactTimer, "paused timer keeps compact timer")
 check(fresh.presentation(inputs(needs: 2), now: now) == .compactAgent, "needs action shows compact agent")
-check(fresh.presentation(inputs(.running, needs: 1), now: now) == .compactBoth, "timer plus agent shows both")
+check(fresh.presentation(inputs(.running, needs: 1), now: now) == .compactAgent, "agent takes priority over timer")
 check(fresh.presentation(inputs(.running, hover: true), now: now) == .miniPlayer, "hover on running timer opens mini player")
 check(fresh.presentation(inputs(.paused, hover: true), now: now) == .miniPlayer, "hover on paused timer opens mini player")
-check(fresh.presentation(inputs(.running, needs: 1, hover: true), now: now) == .miniPlayer, "hover with timer and agent opens mini player")
+check(fresh.presentation(inputs(.running, needs: 1, hover: true), now: now) == .compactAgent, "agent takes priority while hovering")
 check(fresh.presentation(inputs(needs: 1, hover: true), now: now) == .compactAgent, "hover with agent only stays compact")
 check(fresh.presentation(inputs(hover: true), now: now) == .idle, "hover without activity stays idle")
 
@@ -42,6 +42,20 @@ check(fresh.presentation(inputs(hover: true), now: now) == .idle, "hover without
 check(fresh.presentation(inputs(.running, focus: false), now: now) == .idle, "focus setting off hides the timer")
 check(fresh.presentation(inputs(.running, needs: 1, agents: false), now: now) == .compactTimer, "agents setting off hides the agent")
 check(fresh.presentation(inputs(needs: 3, agents: false), now: now) == .idle, "both settings off shows idle")
+
+var toastState = IslandState()
+toastState.showToast("Сохранено", at: now)
+var musicInputs = inputs()
+musicInputs.musicPlaying = true
+check(fresh.presentation(musicInputs, now: now) == .compactMusic, "music shows when idle")
+musicInputs.hovering = true
+check(fresh.presentation(musicInputs, now: now) == .musicPlayer, "hover expands music")
+check(toastState.presentation(musicInputs, now: now + 1) == .toast, "toast beats music")
+check(toastState.presentation(inputs(.running), now: now + 1) == .toast, "toast beats focus")
+check(toastState.presentation(inputs(needs: 1), now: now + 1) == .compactAgent, "agent beats toast")
+check(toastState.presentation(musicInputs, now: now + 2.5) == .musicPlayer, "toast expires after 2.5 seconds")
+musicInputs.musicEnabled = false
+check(fresh.presentation(musicInputs, now: now) == .idle, "disabled music stays hidden")
 
 // 2. Тихий режим: done копится во время фокуса, needsAction показывается сразу.
 check(IslandState.isQuiet(timer: .running, phase: .focus), "quiet while a focus phase runs")
@@ -54,7 +68,7 @@ quiet.agentsFinished(2, quiet: true)
 quiet.agentsFinished(1, quiet: false)
 check(quiet.queuedAgentDone == 2, "done events queue only in quiet mode")
 check(quiet.presentation(inputs(.running), now: now) == .compactTimer, "queued done leaves the island unchanged")
-check(quiet.presentation(inputs(.running, needs: 1), now: now) == .compactBoth, "needs action shows during quiet mode")
+check(quiet.presentation(inputs(.running, needs: 1), now: now) == .compactAgent, "needs action shows during quiet mode")
 
 // 3. Баннер окончания фазы: приоритет, срок жизни, подпись.
 quiet.phaseEnded(finished: .focus, next: .shortBreak, nextMinutes: 5, completedToday: 3, at: now)

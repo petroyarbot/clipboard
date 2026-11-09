@@ -35,13 +35,29 @@ final class ClipPanel: NSPanel {
     let focusTimer = FocusTimer()
     let usage = UsageMonitor()
     let agents = AgentMonitor()
+    lazy var shelf = ShelfStore(dataDir: NotchClipDataLocation.directory, retentionDays: ShelfRetention.days(defaults: .standard))
+    lazy var focusShield = FocusShield()
+    lazy var activityTracker = ActivityTracker(dataDir: NotchClipDataLocation.directory)
+    private var shelfPurgeTimer: Timer?
+    private var screenshotWatcher: ScreenshotWatcher?
+    lazy var ocr = OCRCache(dataDirectory: NotchClipDataLocation.directory)
     /// The closed-notch Live Activity (timer, agents, phase-end banner).
-    var liveActivity: LiveActivityController!
+    var liveActivity: LiveActivityController?
     private var statusCancellables = Set<AnyCancellable>()
     var panel: ClipPanel!
+    private var shelfDropPanel: IslandPanel?
+    private var focusShieldCompletionSummary: String?
+    private var dragMonitors: [Any] = []
+    private var dragChangeCount = NSPasteboard(name: .drag).changeCount
+    private var dropHideWork: DispatchWorkItem?
     var status: NSStatusItem!
     var statusMenu: NSMenu!
     var hotKey: EventHotKeyRef?
+    var thoughtHotKey: EventHotKeyRef?
+    lazy var thought = ThoughtCapture(dataDirectory: NotchClipDataLocation.directory)
+    var thoughtPanel: ClipPanel?
+    var previousApp: NSRunningApplication?
+    private var thoughtResignObserver: NSObjectProtocol?
     var eventHandler: EventHandlerRef?
     var mouseTimer: Timer?
     var wasInTrigger = false
@@ -54,6 +70,7 @@ final class ClipPanel: NSPanel {
     @Published var collapsedHeight: CGFloat = 28
     @AppStorage("hoverEnabled") var hoverEnabled = true
     @AppStorage("shortcut") var shortcut = 0
+    @AppStorage("thoughtShortcut") var thoughtShortcut = 0
     @AppStorage("panelWidth") var panelWidth = 620.0
     @AppStorage("panelHeight") var panelHeight = 500.0
     @AppStorage("animationDuration") var animationDuration = 0.30
@@ -63,6 +80,8 @@ final class ClipPanel: NSPanel {
     var size: NSSize { NSSize(width: panelWidth, height: panelHeight) }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Writing a command to a dead helper pipe must not kill the app.
+        signal(SIGPIPE, SIG_IGN)
         NSApp.setActivationPolicy(.accessory)
         panel = ClipPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isFloatingPanel = true
@@ -81,33 +100,118 @@ final class ClipPanel: NSPanel {
         status.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusMenu = makeStatusMenu()
         var type = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, context in
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
             guard let context else { return noErr }
             let delegate = Unmanaged<AppDelegate>.fromOpaque(context).takeUnretainedValue()
-            DispatchQueue.main.async { delegate.toggle() }
+            var hotKeyID = EventHotKeyID()
+            if let event { GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &hotKeyID) }
+            DispatchQueue.main.async {
+                if hotKeyID.id == 2 { delegate.showThought() }
+                else if hotKeyID.id == 1 { delegate.toggle() }
+            }
             return noErr
         }, 1, &type, Unmanaged.passUnretained(self).toOpaque(), &eventHandler)
-        registerShortcut(); store.start()
+        registerShortcut(); registerThoughtShortcut(); store.start()
         usage.start(); agents.start()
-        liveActivity = LiveActivityController(timer: focusTimer, agents: agents)
-        liveActivity.onOpen = { [weak self] tab in self?.openPanel(on: tab) }
-        liveActivity.onVisibilityChanged = { [weak self] in self?.updateHoverPoll() }
-        liveActivity.start()
+        focusTimer.onFocusStart = { [weak self] end in self?.focusShield.start(endDate: end) }
+        focusTimer.onFocusStop = { [weak self] in
+            guard let self else { return }
+            self.focusShieldCompletionSummary = self.focusShield.stop()
+            self.liveActivity?.focusSummary = nil
+        }
+        focusTimer.onFocusCompleted = { [weak self] seconds in
+            guard let self else { return }
+            self.liveActivity?.focusSummary = self.focusShieldCompletionSummary
+            self.activityTracker.addFocus(seconds: seconds)
+        }
+        activityTracker.start()
+        shelf.purgeExpired()
+        shelfPurgeTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.shelf.retentionDays = ShelfRetention.days(defaults: .standard)
+                self.shelf.purgeExpired()
+            }
+        }
+        let island = LiveActivityController(timer: focusTimer, agents: agents)
+        island.onOpen = { [weak self] tab in self?.openPanel(on: tab) }
+        island.onVisibilityChanged = { [weak self] in self?.updateHoverPoll() }
+        liveActivity = island
+        island.start()
+        setupShelfDropPanel()
+        focusShield.onToast = { [weak self] text in self?.liveActivity?.showToast(text) }
+        thought.onSaved = { [weak self] in self?.liveActivity?.showToast("Мысль сохранена") }
+        thought.$lastResult.compactMap { $0 }.receive(on: RunLoop.main).sink { [weak self] text in
+            self?.liveActivity?.showToast(text)
+        }.store(in: &statusCancellables)
+        screenshotWatcher = ScreenshotWatcher { [weak self] url in self?.store.importImageFile(url) }
+        updateScreenshotWatcher()
         observeStatusItem()
         setupLoginItem()
         NotificationCenter.default.addObserver(self, selector: #selector(menuDidOpen), name: NSMenu.didBeginTrackingNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(menuDidClose), name: NSMenu.didEndTrackingNotification, object: nil)
         NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.updateHoverPoll() }
+            .sink { [weak self] _ in self?.updateHoverPoll(); self?.updateScreenshotWatcher() }
             .store(in: &statusCancellables)
         updateHoverPoll()
+    }
+
+    private func setupShelfDropPanel() {
+        guard let screen = IslandMetrics.targetScreen() else { return }
+        let metrics = IslandMetrics(screen: screen)
+        let window = IslandPanel(contentRect: NSRect(x: metrics.frame.midX - metrics.notchWidth / 2, y: metrics.frame.maxY - metrics.notchHeight, width: metrics.notchWidth, height: metrics.notchHeight), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isOpaque = false; window.backgroundColor = .clear; window.hasShadow = false
+        window.level = .init(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)))
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        window.contentView = ShelfDropView(delegate: self)
+        shelfDropPanel = window
+        let mask: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
+        if let monitor = NSEvent.addGlobalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            Task { @MainActor in self?.handleDragMouse(event.type) }
+        }) { dragMonitors.append(monitor) }
+        if let monitor = NSEvent.addLocalMonitorForEvents(matching: mask, handler: { [weak self] event in
+            self?.handleDragMouse(event.type)
+            return event
+        }) { dragMonitors.append(monitor) }
+    }
+
+    private func updateScreenshotWatcher() {
+        let defaults = UserDefaults.standard
+        let enabled = defaults.object(forKey: ScreenshotWatcher.historyKey) == nil || defaults.bool(forKey: ScreenshotWatcher.historyKey)
+        if enabled { screenshotWatcher?.start() } else { screenshotWatcher?.stop() }
+    }
+
+    private func handleDragMouse(_ type: NSEvent.EventType) {
+        let board = NSPasteboard(name: .drag)
+        switch type {
+        case .leftMouseDown:
+            dropHideWork?.cancel()
+            shelfDropPanel?.orderOut(nil)
+            dragChangeCount = board.changeCount
+        case .leftMouseDragged:
+            if board.changeCount != dragChangeCount, board.availableType(from: DropImporter.dragTypes) != nil {
+                shelfDropPanel?.orderFrontRegardless()
+                // Failsafe: a missed mouse-up must not leave the drop window over the notch.
+                scheduleShelfDropHide(after: 20)
+            }
+        case .leftMouseUp:
+            scheduleShelfDropHide()
+        default: break
+        }
+    }
+
+    func scheduleShelfDropHide(after delay: TimeInterval = 0.3) {
+        dropHideWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.shelfDropPanel?.orderOut(nil) }
+        dropHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     /// Опрос указателя каждые 25 мс нужен, пока работает наведение на панель, открыта панель или виден островок.
     /// В остальное время таймер остановлен.
     func updateHoverPoll() {
-        let needed = hoverEnabled || expanded || liveActivity.isIslandVisible
+        let needed = hoverEnabled || expanded || (liveActivity?.isIslandVisible ?? false)
         if needed {
             guard mouseTimer == nil else { return }
             let timer = Timer(timeInterval: 0.025, repeats: true) { [weak self] _ in Task { @MainActor in self?.checkHover() } }
@@ -213,6 +317,53 @@ final class ClipPanel: NSPanel {
         let result = RegisterEventHotKey(keys[max(0, min(shortcut, keys.count - 1))], UInt32(cmdKey | shiftKey), EventHotKeyID(signature: 0x4E434C50, id: 1), GetApplicationEventTarget(), 0, &hotKey)
         if result != noErr { store.errorMessage = "Не удалось включить горячую клавишу. Попробуй другую в настройках." }
     }
+    func registerThoughtShortcut() {
+        if let thoughtHotKey { UnregisterEventHotKey(thoughtHotKey); self.thoughtHotKey = nil }
+        let options: [(UInt32, UInt32)] = [(UInt32(kVK_Space), UInt32(optionKey)), (UInt32(kVK_Space), UInt32(controlKey | optionKey)), (UInt32(kVK_ANSI_T), UInt32(cmdKey | shiftKey))]
+        let (key, modifiers) = options[max(0, min(thoughtShortcut, options.count - 1))]
+        if RegisterEventHotKey(key, modifiers, EventHotKeyID(signature: 0x4E434C50, id: 2), GetApplicationEventTarget(), 0, &thoughtHotKey) != noErr {
+            store.errorMessage = "Не удалось включить горячую клавишу мысли."
+        }
+    }
+    func showThought() {
+        guard let screen = IslandMetrics.targetScreen() else { return }
+        if thoughtPanel?.isVisible == true {
+            NSApp.activate(ignoringOtherApps: true)
+            thoughtPanel?.makeKeyAndOrderFront(nil)
+            thought.model.requestFocus()
+            return
+        }
+        let front = NSWorkspace.shared.frontmostApplication
+        previousApp = front?.processIdentifier == ProcessInfo.processInfo.processIdentifier ? nil : front
+        thought.begin()
+        if thoughtPanel == nil {
+            let window = ClipPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 140), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isFloatingPanel = true
+            window.level = .init(rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 1)
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            window.isOpaque = false; window.backgroundColor = .clear
+            window.contentView = NSHostingView(rootView: ThoughtCaptureView(model: thought.model))
+            window.onEscape = { [weak self] in self?.dismissThought() }
+            thought.onDismiss = { [weak self] in self?.dismissThought() }
+            // Clicking elsewhere closes the card; the app the user switched to keeps focus.
+            thoughtResignObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.dismissThought(restoreFocus: false) }
+            }
+            thoughtPanel = window
+        }
+        thoughtPanel?.setFrameOrigin(NSPoint(x: screen.frame.midX - 230, y: screen.frame.maxY - 140))
+        NSApp.activate(ignoringOtherApps: true)
+        thoughtPanel?.makeKeyAndOrderFront(nil)
+        thought.model.requestFocus()
+    }
+    func dismissThought(restoreFocus: Bool = true) {
+        guard thoughtPanel?.isVisible == true else { return }
+        thoughtPanel?.orderOut(nil)
+        if restoreFocus { previousApp?.activate(options: [.activateIgnoringOtherApps]) }
+        previousApp = nil
+        thought.model.text = ""
+        thought.model.errorMessage = nil
+    }
     @objc func menuDidOpen(_ note: Notification) { isMenuTracking = true }
     @objc func menuDidClose(_ note: Notification) { isMenuTracking = false }
     func checkHover() {
@@ -226,8 +377,8 @@ final class ClipPanel: NSPanel {
         let insideTrigger = abs(point.x - frame.midX) < notchWidth / 2 && point.y >= frame.maxY - max(screen.safeAreaInsets.top, 8)
         let now = ProcessInfo.processInfo.systemUptime
         // Over the Live Activity the mini player takes the hover; the full panel waits for a click.
-        liveActivity.pointerMoved(to: point, now: now, hoverEnabled: hoverEnabled, openDelay: hoverOpenDelay, closeDelay: hoverCloseDelay)
-        let islandOwnsPointer = liveActivity.owns(point)
+        liveActivity?.pointerMoved(to: point, now: now, hoverEnabled: hoverEnabled, openDelay: hoverOpenDelay, closeDelay: hoverCloseDelay)
+        let islandOwnsPointer = liveActivity?.owns(point) ?? false
         if hoverEnabled && insideTrigger && !islandOwnsPointer {
             let action = wasInTrigger
                 ? behavior.pointerStayedInTrigger(at: now, delay: hoverOpenDelay)
@@ -252,7 +403,7 @@ final class ClipPanel: NSPanel {
     func show(on screen: NSScreen?, held: Bool) {
         guard let screen else { return }
         hideWork?.cancel()
-        liveActivity.setPanelOpen(true)
+        liveActivity?.setPanelOpen(true)
         behavior.didOpen(held: held)
         if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
             collapsedWidth = max(100, screen.frame.width - left.width - right.width)
@@ -288,7 +439,7 @@ final class ClipPanel: NSPanel {
         updateHoverPoll()
         let work = DispatchWorkItem { [weak self] in
             self?.panel.orderOut(nil)
-            self?.liveActivity.setPanelOpen(false)
+            self?.liveActivity?.setPanelOpen(false)
         }
         hideWork?.cancel(); hideWork = work
         let delay = reduceMotion ? 0 : animationDuration + 0.25
@@ -303,7 +454,15 @@ final class ClipPanel: NSPanel {
     func applicationWillTerminate(_ notification: Notification) {
         NotificationCenter.default.removeObserver(self)
         if let hotKey { UnregisterEventHotKey(hotKey) }
+        if let thoughtHotKey { UnregisterEventHotKey(thoughtHotKey) }
         if let eventHandler { RemoveEventHandler(eventHandler) }
+        screenshotWatcher?.stop()
+        dragMonitors.forEach { NSEvent.removeMonitor($0) }
+        dropHideWork?.cancel()
         usage.stop(); agents.stop()
+        liveActivity?.stop()
+        ThoughtProcessTracker.terminateAll()
+        _ = focusShield.stop(blocking: true)
+        activityTracker.stop(); shelfPurgeTimer?.invalidate()
     }
 }

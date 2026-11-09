@@ -12,12 +12,21 @@ enum NotchClipDataLocation {
 }
 
 struct Limits: Equatable {
-    /// Percent left in the window; nil when there is no data or the window already expired.
+    /// Percent left in the window; nil when there is no data.
     var fiveHourLeft: Int?
     var fiveHourReset: Date?
     var weekLeft: Int?
     var weekReset: Date?
     var updatedAt: Date
+}
+
+extension Limits {
+    func expiring(at now: Date) -> Limits {
+        var value = self
+        if let reset = fiveHourReset, reset < now { value.fiveHourLeft = 100; value.fiveHourReset = nil }
+        if let reset = weekReset, reset < now { value.weekLeft = 100; value.weekReset = nil }
+        return value
+    }
 }
 
 struct UsageSnapshot: Equatable {
@@ -51,11 +60,11 @@ enum UsageParser {
         fractionalDates.date(from: text) ?? plainDates.date(from: text)
     }
 
-    /// A window whose reset time has passed has no known usage any more, so its percent is nil.
+    /// A window whose reset time has passed is treated as reset.
     static func window(_ value: Any?, now: Date, usedKey: String) -> Window? {
         guard let dict = value as? [String: Any], let used = number(dict[usedKey]) else { return nil }
         let reset = number(dict["resets_at"]).map { Date(timeIntervalSince1970: $0) }
-        if let reset, reset < now { return (nil, nil) }
+        if let reset, reset < now { return (100, nil) }
         let left = min(100, max(0, 100 - used)).rounded()
         return (Int(left), reset)
     }
@@ -291,6 +300,7 @@ final class UsageMonitor: ObservableObject {
     static let claudeDebounce: TimeInterval = 1
 
     @Published private(set) var snapshot = UsageSnapshot(claude: nil, codex: nil)
+    @Published private(set) var codexStatus: String?
     @Published private(set) var claudeStatus: ClaudeUsageStatus = .ok
     /// Time of the data behind the Claude row (API response or status line file), nil when there is none.
     @Published private(set) var claudeUpdatedAt: Date?
@@ -298,6 +308,8 @@ final class UsageMonitor: ObservableObject {
     let dataDirectory: URL
     let pollInterval: TimeInterval
 
+    private let codexClient = CodexUsageClient()
+    private var codexApi = CodexApiState()
     private let codexReader: CodexLimitsReader
     private let claudeClient: ClaudeUsageClient
     private var claudeApi = ClaudeApiState()
@@ -388,12 +400,17 @@ final class UsageMonitor: ObservableObject {
         guard !codexLoading else { return }
         codexLoading = true
         let reader = codexReader
+        let client = codexClient
+        let due = Date() >= codexApi.nextFetch
         Task.detached(priority: .utility) {
+            let result = due ? client.fetch(now: Date()) : nil
             let limits = reader.latestLimits(now: Date())
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.codexLoading = false
-                self.codex = limits
+                if let result { self.codexApi.apply(result, now: Date()) }
+                self.codexStatus = self.codexApi.status
+                self.codex = self.codexApi.resolve(file: limits)?.expiring(at: Date())
                 self.publish()
             }
         }
@@ -412,7 +429,7 @@ final class UsageMonitor: ObservableObject {
     }
 
     private func publish() {
-        let claude = claudeApi.resolve(file: claudeFile)
+        let claude = claudeApi.resolve(file: claudeFile)?.expiring(at: Date())
         if claudeStatus != claudeApi.status { claudeStatus = claudeApi.status }
         if claudeUpdatedAt != claude?.updatedAt { claudeUpdatedAt = claude?.updatedAt }
         let next = UsageSnapshot(claude: claude, codex: codex)

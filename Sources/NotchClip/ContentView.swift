@@ -3,6 +3,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 final class ViewState: ObservableObject {
+    @Published var ocrRevision = 0
     @Published var query = ""
     @Published var confirmHistoryClear = false
     @Published var filter = 0
@@ -19,14 +20,16 @@ struct ContentView: View {
     @AppStorage("panelHeight") var panelHeight = 500.0
     @AppStorage(PanelTab.storageKey) private var tabRaw = PanelTab.clipboard.rawValue
     @StateObject private var state = ViewState()
+    @AppStorage("recognizeImageText") private var recognizeImageText = true
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var filtered: [Clip] {
-        store.history.ordered.filter { clip in
+        _ = state.ocrRevision
+        return store.history.ordered.filter { clip in
             let isLink = link(for: clip) != nil
             let typeMatches = state.filter == 0 || (state.filter == 1 && clip.kind == .text && !isLink) || (state.filter == 2 && (clip.kind == .image || isImageFile(clip))) || (state.filter == 3 && clip.kind == .file) || (state.filter == 4 && isLink)
             let value = clip.kind == .file ? fileName(for: clip) : (String(data: clip.data, encoding: .utf8) ?? "")
-            let queryMatches = state.query.isEmpty || value.localizedCaseInsensitiveContains(state.query)
+            let queryMatches = state.query.isEmpty || value.localizedCaseInsensitiveContains(state.query) || (recognizeImageText && delegate.ocr.matches(query: state.query, clipID: clip.id.uuidString))
             return typeMatches && queryMatches
         }
     }
@@ -47,9 +50,30 @@ struct ContentView: View {
         .clipShape(shape)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .preferredColorScheme(.dark)
+        .onAppear { enqueueOCR() }
+        .onChange(of: store.history.clips.count) { _ in enqueueOCR() }
+        .onChange(of: recognizeImageText) { _ in enqueueOCR() }
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+            if recognizeImageText && !state.query.isEmpty { state.ocrRevision += 1 }
+        }
         .onChange(of: delegate.expanded) { open in
             if !open { state.editingID = nil; state.previewID = nil; state.isEditing = false }
         }
+    }
+    func enqueueOCR() {
+        guard recognizeImageText else { return }
+        for clip in store.history.ordered.filter({ $0.kind == .image }).prefix(100) {
+            let data = clip.data
+            delegate.ocr.enqueue(clipID: clip.id.uuidString) { data }
+        }
+    }
+    func copyOCR(_ clip: Clip) {
+        guard let text = delegate.ocr.text(for: clip.id.uuidString), !text.isEmpty else {
+            store.errorMessage = "Текст ещё распознаётся или не найден."
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
     var content: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -98,8 +122,10 @@ struct ContentView: View {
                 case .focus:
                     ScrollView(showsIndicators: false) {
                         FocusView(timer: delegate.focusTimer).padding(.top, 6).padding(.bottom, 4)
+                        if delegate.focusTimer.state == .idle { DayStatsView(tracker: delegate.activityTracker) }
                     }
                 case .agents: AgentsView(usage: delegate.usage, agents: delegate.agents)
+                case .shelf: ShelfView(store: delegate.shelf)
                 }
             }
         }
@@ -182,6 +208,7 @@ struct ContentView: View {
                 Text(clip.kind == .image ? "Просмотр изображения" : clip.kind == .file ? fileName(for: clip) : "Просмотр текста")
                     .font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 Spacer()
+                if clip.kind == .image && recognizeImageText { Button("Скопировать текст") { copyOCR(clip) } }
                 if clip.kind == .text && !state.isEditing {
                     Button("Редактировать") { state.isEditing = true; delegate.editing = true }
                 }
@@ -240,6 +267,7 @@ struct ContentView: View {
         }.contentShape(Rectangle()).contextMenu {
             Button("Просмотреть", systemImage: "eye") { openPreview(clip) }
             Button("Копировать", systemImage: "doc.on.doc") { delegate.select(clip) }
+            if clip.kind == .image && recognizeImageText { Button("Скопировать текст") { copyOCR(clip) } }
             Button(clip.isPinned ? "Открепить" : "Закрепить", systemImage: clip.isPinned ? "pin.slash" : "pin") { store.togglePin(clip.id) }
             if clip.kind == .text { Button("Редактировать", systemImage: "pencil") { openPreview(clip, edit: true) } }
             Button("Удалить", systemImage: "trash", role: .destructive) { store.remove(clip.id) }
