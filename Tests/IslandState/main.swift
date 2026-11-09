@@ -31,10 +31,10 @@ check(fresh.presentation(inputs(), now: now) == .idle, "nothing active shows idl
 check(fresh.presentation(inputs(.running), now: now) == .compactTimer, "running timer shows compact timer")
 check(fresh.presentation(inputs(.paused), now: now) == .compactTimer, "paused timer keeps compact timer")
 check(fresh.presentation(inputs(needs: 2), now: now) == .compactAgent, "needs action shows compact agent")
-check(fresh.presentation(inputs(.running, needs: 1), now: now) == .compactAgent, "agent takes priority over timer")
+check(fresh.presentation(inputs(.running, needs: 1), now: now) == .compactBoth, "agent and timer share the island")
 check(fresh.presentation(inputs(.running, hover: true), now: now) == .miniPlayer, "hover on running timer opens mini player")
 check(fresh.presentation(inputs(.paused, hover: true), now: now) == .miniPlayer, "hover on paused timer opens mini player")
-check(fresh.presentation(inputs(.running, needs: 1, hover: true), now: now) == .compactAgent, "agent takes priority while hovering")
+check(fresh.presentation(inputs(.running, needs: 1, hover: true), now: now) == .miniPlayer, "focus opens on hover with agent")
 check(fresh.presentation(inputs(needs: 1, hover: true), now: now) == .compactAgent, "hover with agent only stays compact")
 check(fresh.presentation(inputs(hover: true), now: now) == .idle, "hover without activity stays idle")
 
@@ -49,13 +49,31 @@ var musicInputs = inputs()
 musicInputs.musicPlaying = true
 check(fresh.presentation(musicInputs, now: now) == .compactMusic, "music shows when idle")
 musicInputs.hovering = true
-check(fresh.presentation(musicInputs, now: now) == .musicPlayer, "hover expands music")
+check(fresh.presentation(musicInputs, now: now) == .compactMusic, "hover on music opens the buffer by default (no mini player)")
+musicInputs.musicHover = .openMiniPlayer
+check(fresh.presentation(musicInputs, now: now) == .musicPlayer, "hover expands music when mini player is chosen")
+musicInputs.musicHover = .openBuffer
+check(fresh.presentation(inputs(.running, hover: true), now: now) == .miniPlayer, "music hover setting does not change the focus mini player")
+musicInputs.hovering = false
 check(toastState.presentation(musicInputs, now: now + 1) == .toast, "toast beats music")
 check(toastState.presentation(inputs(.running), now: now + 1) == .toast, "toast beats focus")
-check(toastState.presentation(inputs(needs: 1), now: now + 1) == .compactAgent, "agent beats toast")
-check(toastState.presentation(musicInputs, now: now + 2.5) == .musicPlayer, "toast expires after 2.5 seconds")
+check(toastState.presentation(inputs(needs: 1), now: now + 1) == .toast, "toast beats agent")
+check(toastState.presentation(musicInputs, now: now + 2.5) == .compactMusic, "toast expires after 2.5 seconds")
 musicInputs.musicEnabled = false
 check(fresh.presentation(musicInputs, now: now) == .idle, "disabled music stays hidden")
+
+var combo = inputs(.running)
+combo.musicPlaying = true
+check(fresh.presentation(combo, now: now) == .compactFocusMusic, "focus and music share island")
+combo.needsActionCount = 2
+check(fresh.presentation(combo, now: now) == .compactBoth, "agent and focus outrank music")
+combo.focusEnabled = false
+check(fresh.presentation(combo, now: now) == .compactAgentMusic, "agent and music share island")
+combo.hovering = true
+combo.musicHover = .openMiniPlayer
+check(fresh.presentation(combo, now: now) == .musicPlayer, "music hover works with agent")
+combo.musicEnabled = false
+check(fresh.presentation(combo, now: now) == .compactAgent, "disabled music leaves agent")
 
 // 2. Тихий режим: done копится во время фокуса, needsAction показывается сразу.
 check(IslandState.isQuiet(timer: .running, phase: .focus), "quiet while a focus phase runs")
@@ -68,7 +86,7 @@ quiet.agentsFinished(2, quiet: true)
 quiet.agentsFinished(1, quiet: false)
 check(quiet.queuedAgentDone == 2, "done events queue only in quiet mode")
 check(quiet.presentation(inputs(.running), now: now) == .compactTimer, "queued done leaves the island unchanged")
-check(quiet.presentation(inputs(.running, needs: 1), now: now) == .compactAgent, "needs action shows during quiet mode")
+check(quiet.presentation(inputs(.running, needs: 1), now: now) == .compactBoth, "needs action shares island during quiet mode")
 
 // 3. Баннер окончания фазы: приоритет, срок жизни, подпись.
 quiet.phaseEnded(finished: .focus, next: .shortBreak, nextMinutes: 5, completedToday: 3, at: now)
@@ -153,6 +171,12 @@ check(IslandState.agentsFinishedText(11) == "11 агентов закончил�
 check(IslandState.agentsFinishedText(22) == "22 агента закончили", "twenty-two agents")
 
 // 7. Настройки по умолчанию включены.
+let musicSuite = UserDefaults(suiteName: "island-music-hover-\(UUID().uuidString)")!
+check(IslandSettings.musicHoverAction(defaults: musicSuite) == .openBuffer, "hover on music defaults to the buffer")
+musicSuite.set("miniPlayer", forKey: IslandSettings.hoverMusicActionKey)
+check(IslandSettings.musicHoverAction(defaults: musicSuite) == .openMiniPlayer, "hover on music can be set to the mini player")
+musicSuite.set("garbage", forKey: IslandSettings.hoverMusicActionKey)
+check(IslandSettings.musicHoverAction(defaults: musicSuite) == .openBuffer, "unknown stored value falls back to the buffer")
 let suite = UserDefaults(suiteName: "island-tests-\(UUID().uuidString)")!
 check(IslandSettings.isEnabled(IslandSettings.focusKey, defaults: suite), "focus live activity defaults to on")
 check(IslandSettings.isEnabled(IslandSettings.agentsKey, defaults: suite), "agents live activity defaults to on")

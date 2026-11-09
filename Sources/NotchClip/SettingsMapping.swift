@@ -15,6 +15,7 @@ enum SettingsMapping {
         "screenshotsToHistory", "screenshotsMoveEnabled", "recognizeImageText",
         "focusShieldDND", "focusShieldSummary", "focusShieldApps", "focusShieldSites",
         "focusShieldShortcutOn", "focusShieldShortcutOff", "shelfRetentionDays", "assistantVaultPath",
+        "hoverMusicAction", "appearanceAccent", "appearanceMusicColor", "appearanceMusicCustomColor",
     ]
 
     /// Ключи прогресса и данных, которые сброс настроек не трогает.

@@ -17,7 +17,8 @@ check(PanelTab.restore(nil) == .clipboard, "default tab is Буфер when nothi
 check(PanelTab.restore("unknown") == .clipboard, "unknown stored tab falls back to Буфер")
 check(PanelTab.restore("agents") == .agents, "stored agents tab is restored")
 check(PanelTab.restore("focus") == .focus, "stored focus tab is restored")
-check(PanelTab.allCases.map(\.title) == ["Буфер", "Фокус", "Агенты", "Полка"], "tab titles are in display order")
+check(PanelTab.allCases.map(\.title) == ["Буфер", "Фокус", "Агенты", "Полка", "Музыка"], "tab titles are in display order")
+check(PanelTab.music.symbol == "music.note", "music uses the music note symbol")
 check(PanelTab.allCases.allSatisfy { PanelTab.restore($0.rawValue) == $0 }, "every tab survives a raw value round trip")
 
 if failures > 0 {

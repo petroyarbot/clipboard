@@ -1,29 +1,44 @@
 import AppKit
 import SwiftUI
 
-/// Компактная карточка "Сегодня" для вкладки Фокус: время в фокусе и топ-5 приложений.
+/// Компактная карточка "Сегодня" для вкладки Фокус: время в фокусе и до трёх приложений.
 struct DayStatsView: View {
     @ObservedObject var tracker: ActivityTracker
+    @ObservedObject var timer: FocusTimer
 
-    /// Акцент фокуса.
-    static let accent = Color(red: 255 / 255, green: 159 / 255, blue: 10 / 255)
+    @AppStorage(AppearanceSettings.accentKey) private var accentHex = AppearanceSettings.accentDefaultHex
+
+    private var accent: Color { Color(hex: accentHex) }
 
     var body: some View {
         let stats = tracker.today
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Сегодня: в фокусе \(ActivityFormat.duration(stats.focusSeconds)) · \(ActivityFormat.sessions(stats.sessions))")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
+        VStack(alignment: .leading, spacing: 8) {
+            // Единственный источник сессий и времени — ActivityTracker (addFocus на каждую завершённую фокус-сессию).
+            // Точки — прогресс текущего цикла из FocusTimer.focusInCycle.
+            HStack(spacing: 8) {
+                Text("Сегодня: в фокусе \(ActivityFormat.duration(stats.focusSeconds)) · \(ActivityFormat.sessions(stats.sessions))")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                HStack(spacing: 3) {
+                    ForEach(0..<FocusTimer.sessionsPerCycle, id: \.self) { index in
+                        Circle()
+                            .fill(index < timer.focusInCycle ? accent : Color.white.opacity(0.2))
+                            .frame(width: 6, height: 6)
+                    }
+                }
+            }
 
             if stats.topApps.isEmpty {
                 Text("Пока нет данных за сегодня")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.5))
             } else {
-                let maxSeconds = stats.topApps.map(\.seconds).max() ?? 1
+                let apps = Array(stats.topApps.prefix(3))
+                let maxSeconds = apps.map(\.seconds).max() ?? 1
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(stats.topApps, id: \.bundleID) { app in
+                    ForEach(apps, id: \.bundleID) { app in
                         appRow(app, maxSeconds: maxSeconds)
                     }
                 }
@@ -31,6 +46,11 @@ struct DayStatsView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: FocusLayoutFramesKey.self, value: [.stats: proxy.frame(in: .named(FocusLayoutCoordinateSpace.name))])
+            }
+        }
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color.white.opacity(0.07))
@@ -53,7 +73,7 @@ struct DayStatsView: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.08))
                     Capsule()
-                        .fill(Self.accent)
+                        .fill(accent)
                         .frame(width: max(4, proxy.size.width * fraction))
                 }
             }

@@ -6,6 +6,7 @@ enum PanelTab: String, CaseIterable, Equatable {
     case focus
     case agents
     case shelf
+    case music
 
     static let storageKey = "panelTab"
 
@@ -15,6 +16,7 @@ enum PanelTab: String, CaseIterable, Equatable {
         case .focus: return "Фокус"
         case .agents: return "Агенты"
         case .shelf: return "Полка"
+        case .music: return "Музыка"
         }
     }
 
@@ -24,6 +26,7 @@ enum PanelTab: String, CaseIterable, Equatable {
         case .focus: return "timer"
         case .agents: return "sparkles"
         case .shelf: return "tray.full"
+        case .music: return "music.note"
         }
     }
 

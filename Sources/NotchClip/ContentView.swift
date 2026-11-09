@@ -53,6 +53,7 @@ struct ContentView: View {
         .onAppear { enqueueOCR() }
         .onChange(of: store.history.clips.count) { _ in enqueueOCR() }
         .onChange(of: recognizeImageText) { _ in enqueueOCR() }
+        .onChange(of: tabRaw) { _ in delegate.liveActivity?.updateMusicActivity() }
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
             if recognizeImageText && !state.query.isEmpty { state.ocrRevision += 1 }
         }
@@ -121,11 +122,13 @@ struct ContentView: View {
                 case .clipboard: history
                 case .focus:
                     ScrollView(showsIndicators: false) {
-                        FocusView(timer: delegate.focusTimer).padding(.top, 6).padding(.bottom, 4)
-                        if delegate.focusTimer.state == .idle { DayStatsView(tracker: delegate.activityTracker) }
+                        FocusView(timer: delegate.focusTimer, tracker: delegate.activityTracker)
+                            .padding(.top, 6).padding(.bottom, 4)
                     }
                 case .agents: AgentsView(usage: delegate.usage, agents: delegate.agents)
                 case .shelf: ShelfView(store: delegate.shelf)
+                case .music:
+                    if let monitor = delegate.liveActivity?.music { NowPlayingPanelView(monitor: monitor) }
                 }
             }
         }

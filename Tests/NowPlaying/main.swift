@@ -162,5 +162,14 @@ check(monitor.status == .stopped && monitor.snapshot == nil, "monitor: deactivat
 monitor.send(.next)
 check(true, "monitor: send while inactive is a no-op")
 
+// Цвета и настройки оформления.
+check(RGB8(hex: "#FF9F0A") == RGB8.accentDefault, "hex: #FF9F0A is the default accent")
+check(RGB8(hex: "0a84ff") == RGB8(r: 10, g: 132, b: 255), "hex: no hash and lowercase are accepted")
+check(RGB8(hex: "#FF9F") == nil && RGB8(hex: "zzzzzz") == nil, "hex: short or non-hex input is rejected")
+check(RGB8(r: 10, g: 132, b: 255).hex == "#0A84FF", "hex: formats back to uppercase #RRGGBB")
+check(RGB8(nsColor: RGB8(r: 48, g: 209, b: 88).nsColor) == RGB8(r: 48, g: 209, b: 88), "hex: NSColor round trip keeps channels")
+check(MusicColorMode(rawValue: AppearanceSettings.musicColorDefault) == .accent, "music color defaults to Акцентный")
+check(MusicColorMode(rawValue: "unknown") == nil, "unknown music color value is not a mode")
+
 print(failures == 0 ? "All NowPlaying checks passed." : "\(failures) NowPlaying check(s) failed.")
 exit(failures == 0 ? 0 : 1)

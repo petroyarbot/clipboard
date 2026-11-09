@@ -30,6 +30,64 @@ import SwiftUI
             while Date() < end { RunLoop.current.run(until: Date().addingTimeInterval(0.01)) }
         }
 
+        final class FrameBox: ObservableObject {
+            @Published var frames: [FocusLayoutElement: CGRect] = [:]
+        }
+        let renderDir = URL(fileURLWithPath: "/tmp/claude-501/nc-render", isDirectory: true)
+        try FileManager.default.createDirectory(at: renderDir, withIntermediateDirectories: true)
+        let fixtureDir = root.appendingPathComponent("activity", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixtureDir, withIntermediateDirectories: true)
+        let dayKey = ISO8601DateFormatter()
+        dayKey.formatOptions = [.withFullDate]
+        let record = ActivityDayRecord(day: dayKey.string(from: Date()), seconds: ["com.anthropic.Claude": 2400, "com.example.NotchClip": 1200, "com.deepseek.desktop": 600], names: ["com.anthropic.Claude": "Claude", "com.example.NotchClip": "NotchClip", "com.deepseek.desktop": "DeepSeek"], focusSeconds: 1260, sessions: 1)
+        let dateKey = dayKey.string(from: Date())
+        let recordURL = fixtureDir.appendingPathComponent("activity-\(dateKey).json")
+        try JSONEncoder().encode(record).write(to: recordURL)
+        let tracker = ActivityTracker(dataDir: fixtureDir)
+        let timerDefaults = UserDefaults(suiteName: "notchclip-panel-render-\(UUID())")!
+        timerDefaults.set(25 * 60, forKey: "focusTimer.focusSeconds")
+        let recentKey = "focusTimer.recentSeconds"
+        let savedRecents = UserDefaults.standard.string(forKey: recentKey)
+        UserDefaults.standard.set("300,600", forKey: recentKey)
+        defer { if let savedRecents { UserDefaults.standard.set(savedRecents, forKey: recentKey) } else { UserDefaults.standard.removeObject(forKey: recentKey) } }
+        let timer = FocusTimer(defaults: timerDefaults, playSound: {}, notify: { _ in })
+
+        func capture(_ name: String, running: Bool) throws {
+            let frames = FrameBox()
+            let view = ZStack {
+                Color.black
+                ScrollView(showsIndicators: false) {
+                    FocusView(timer: timer, tracker: tracker).padding(.horizontal, 22)
+                }
+            }
+                .frame(width: 620, height: 500, alignment: .top)
+                .onPreferenceChange(FocusLayoutFramesKey.self) { frames.frames = $0 }
+            let hosting = NSHostingView(rootView: AnyView(view))
+            hosting.frame = NSRect(x: 0, y: 0, width: 620, height: 500)
+            let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isOpaque = true
+            window.backgroundColor = .black
+            window.contentView = hosting
+            window.orderFrontRegardless()
+            hosting.layoutSubtreeIfNeeded()
+            spin(0.15)
+            hosting.layoutSubtreeIfNeeded()
+            if !running, let wheel = frames.frames[.wheel], let stats = frames.frames[.stats] {
+                if wheel.intersects(stats) { throw NSError(domain: "PanelRender", code: 1, userInfo: [NSLocalizedDescriptionKey: "Focus wheel and stats overlap: \(wheel), \(stats)"]) }
+            } else if !running {
+                throw NSError(domain: "PanelRender", code: 2, userInfo: [NSLocalizedDescriptionKey: "Focus wheel/stats frames missing: \(frames.frames)"])
+            }
+            guard let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else { throw NSError(domain: "PanelRender", code: 3) }
+            hosting.cacheDisplay(in: hosting.bounds, to: rep)
+            guard let png = rep.representation(using: .png, properties: [:]) else { throw NSError(domain: "PanelRender", code: 4) }
+            try png.write(to: renderDir.appendingPathComponent(name))
+            window.orderOut(nil)
+        }
+        try capture("focus-idle.png", running: false)
+        timer.start()
+        try capture("focus-running.png", running: true)
+        timer.reset()
+
         var failed = false
         for tab in [PanelTab.focus, .clipboard] {
             defaults.set(tab.rawValue, forKey: PanelTab.storageKey)

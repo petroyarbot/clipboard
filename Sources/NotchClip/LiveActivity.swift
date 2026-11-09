@@ -128,7 +128,7 @@ final class LiveActivityController {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in
                 guard let self else { return }
-                self.music.setActive(NowPlayingSettings.isEnabled(defaults: self.defaults))
+                self.updateMusicActivity()
                 self.sync()
             }
             .store(in: &cancellables)
@@ -156,6 +156,7 @@ final class LiveActivityController {
     /// Полная панель открыта: островок прячется, потому что панель закрывает то же место.
     func setPanelOpen(_ open: Bool) {
         panelOpen = open
+        updateMusicActivity()
         if open {
             hideWork?.cancel(); shrinkWork?.cancel(); expiryWork?.cancel()
             hovering = false
@@ -165,6 +166,11 @@ final class LiveActivityController {
         } else {
             sync()
         }
+    }
+
+    func updateMusicActivity() {
+        let musicTabVisible = panelOpen && PanelTab.restore(defaults.string(forKey: PanelTab.storageKey)) == .music
+        music.setActive(NowPlayingSettings.isEnabled(defaults: defaults) || musicTabVisible)
     }
 
     /// Указатель внутри островка с таймером: мини-плеер открывается после задержки наведения.
@@ -200,7 +206,9 @@ final class LiveActivityController {
     func owns(_ point: NSPoint) -> Bool {
         guard panel?.isVisible == true, !panelOpen else { return false }
         switch model.presentation {
-        case .compactTimer, .compactBoth, .miniPlayer, .banner, .compactMusic, .musicPlayer, .toast:
+        case .compactMusic where !musicOpensPlayer, .compactAgentMusic where !musicOpensPlayer:
+            return false
+        case .compactTimer, .compactBoth, .compactFocusMusic, .compactAgentMusic, .miniPlayer, .banner, .compactMusic, .musicPlayer, .toast:
             return islandRect().contains(point)
         case .idle, .compactAgent:
             return false
@@ -210,11 +218,14 @@ final class LiveActivityController {
     // MARK: - Входящие события
 
     private var isQuiet: Bool { IslandState.isQuiet(timer: timer.state, phase: timer.phase) }
+    /// Наведение на музыку раскрывает мини-плеер только при настройке "При наведении во время музыки: Мини-плеер".
+    private var musicOpensPlayer: Bool { IslandSettings.musicHoverAction(defaults: defaults) == .openMiniPlayer }
 
     private var canExpand: Bool {
         guard !panelOpen, panel?.isVisible == true else { return false }
         switch model.presentation {
-        case .compactTimer, .compactBoth, .miniPlayer, .compactMusic, .musicPlayer: return true
+        case .compactTimer, .compactBoth, .compactFocusMusic, .miniPlayer, .musicPlayer: return true
+        case .compactMusic, .compactAgentMusic: return musicOpensPlayer
         case .idle, .compactAgent, .banner, .toast: return false
         }
     }
@@ -279,7 +290,8 @@ final class LiveActivityController {
             focusEnabled: IslandSettings.isEnabled(IslandSettings.focusKey, defaults: defaults),
             agentsEnabled: IslandSettings.isEnabled(IslandSettings.agentsKey, defaults: defaults),
             musicEnabled: NowPlayingSettings.isEnabled(defaults: defaults),
-            musicPlaying: music.status == .playing
+            musicPlaying: music.status == .playing,
+            musicHover: IslandSettings.musicHoverAction(defaults: defaults)
         )
         let next = state.presentation(inputs, now: now)
         model.toast = state.toast?.text
@@ -378,8 +390,9 @@ final class LiveActivityController {
     /// Что стоит в крыльях для презентации: по этому описанию считается ширина островка.
     private func compactWings(for presentation: IslandPresentation) -> CompactWings {
         CompactWings(
-            showsTimer: presentation == .compactTimer || presentation == .compactBoth,
-            showsAgent: (presentation == .compactAgent || presentation == .compactBoth) && model.agent != nil,
+            showsTimer: presentation == .compactTimer || presentation == .compactBoth || presentation == .compactFocusMusic,
+            showsAgent: (presentation == .compactAgent || presentation == .compactBoth || presentation == .compactAgentMusic) && model.agent != nil,
+            showsMusic: presentation == .compactMusic || presentation == .compactFocusMusic || presentation == .compactAgentMusic,
             clock: timer.compactText,
             phaseLabel: timer.phase == .focus ? "Фокус" : "Перерыв",
             agentProject: model.agent?.project ?? "",
@@ -389,7 +402,7 @@ final class LiveActivityController {
 
     private static func isCompact(_ presentation: IslandPresentation) -> Bool {
         switch presentation {
-        case .compactTimer, .compactAgent, .compactBoth, .compactMusic: return true
+        case .compactTimer, .compactAgent, .compactBoth, .compactFocusMusic, .compactAgentMusic, .compactMusic: return true
         case .idle, .miniPlayer, .musicPlayer, .banner, .toast: return false
         }
     }

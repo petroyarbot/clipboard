@@ -5,29 +5,33 @@ import SwiftUI
 /// В покое — колёсики часов/минут/секунд; во время работы — кольцо с обратным отсчётом.
 struct FocusView: View {
     @ObservedObject var timer: FocusTimer
+    @ObservedObject var tracker: ActivityTracker
     @AppStorage(FocusView.recentsKey) private var recentsText = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let recentsKey = "focusTimer.recentSeconds"
     private let ringSize: CGFloat = 140
     private let ringWidth: CGFloat = 8
-    private let accent = Color.orange
+    @AppStorage(AppearanceSettings.accentKey) private var accentHex = AppearanceSettings.accentDefaultHex
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 12) {
             if timer.state == .idle {
                 TimeWheelPicker(totalSeconds: pickBinding)
-                recentRow
             } else {
                 ring
-                Color.clear.frame(height: 22)
             }
+            if timer.state == .idle { recentRow }
             controls
             footer
+            DayStatsView(tracker: tracker, timer: timer)
         }
         .foregroundStyle(.white)
         .frame(maxWidth: .infinity)
+        .coordinateSpace(name: FocusLayoutCoordinateSpace.name)
     }
+
+    private var accent: Color { Color(hex: accentHex) }
 
     private var pickBinding: Binding<Int> {
         Binding(get: { timer.focusSeconds }, set: { timer.setFocusSeconds($0) })
@@ -143,7 +147,7 @@ struct FocusView: View {
     }
 
     private var primaryTint: Color {
-        timer.state == .running ? .orange : .green
+        timer.state == .running ? accent : .green
     }
 
     private func roundButton(title: String, fill: Color, action: @escaping () -> Void) -> some View {
@@ -164,18 +168,6 @@ struct FocusView: View {
 
     private var footer: some View {
         HStack {
-            HStack(spacing: 8) {
-                Text("Сегодня: \(timer.completedFocusCount)")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.7))
-                HStack(spacing: 3) {
-                    ForEach(0..<FocusTimer.sessionsPerCycle, id: \.self) { index in
-                        Circle()
-                            .fill(index < timer.focusInCycle ? accent : Color.white.opacity(0.2))
-                            .frame(width: 6, height: 6)
-                    }
-                }
-            }
             Spacer()
             Button {
                 timer.skip()
@@ -211,6 +203,12 @@ struct TimeWheelPicker: View {
                 .frame(height: Self.rowHeight)
         }
         .frame(height: Self.rowHeight * 5)
+        .clipped()
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(key: FocusLayoutFramesKey.self, value: [.wheel: proxy.frame(in: .named(FocusLayoutCoordinateSpace.name))])
+            }
+        }
     }
 
     private enum Part { case hours, minutes, seconds }
@@ -245,6 +243,19 @@ struct TimeWheelPicker: View {
     }
 }
 
+enum FocusLayoutCoordinateSpace {
+    static let name = "focus-layout"
+}
+
+enum FocusLayoutElement: Hashable { case wheel, stats }
+
+struct FocusLayoutFramesKey: PreferenceKey {
+    static var defaultValue: [FocusLayoutElement: CGRect] = [:]
+    static func reduce(value: inout [FocusLayoutElement: CGRect], nextValue: () -> [FocusLayoutElement: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
 /// Непрокрученная позиция — nil: тогда колесо стоит на значении привязки.
 private final class WheelPosition: ObservableObject {
     @Published var stored: Double?
@@ -268,22 +279,27 @@ private struct TimeWheelColumn: View {
     }
 
     var body: some View {
+        // Строки k = -3...3 стоят стопкой с шагом rowHeight; стопка сдвигается на дробную часть
+        // позиции, поэтому колесо движется плавно. Окно — 5 строк (clipped), центр — выбранная строка.
+        // reduceMotion влияет только на анимацию пружины (см. apply).
+        let base = TimeWheelMath.selectedIndex(position: position)
+        let fraction = position - Double(base)
         HStack(spacing: 2) {
             ZStack {
-                ForEach(-3...3, id: \.self) { offset in
-                    let index = TimeWheelMath.selectedIndex(position: position) + offset
-                    let distance = Double(index) - position
-                    Text(String(format: "%02d", TimeWheelMath.wrap(index, count: count)))
-                        .font(.system(size: 28, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white)
-                        .opacity(TimeWheelMath.opacity(distance: distance))
-                        .rotation3DEffect(
-                            .degrees(reduceMotion ? 0 : TimeWheelMath.tilt(distance: distance)),
-                            axis: (x: 1, y: 0, z: 0),
-                            perspective: 0.4
-                        )
-                        .offset(y: CGFloat(distance) * rowHeight)
+                VStack(spacing: 0) {
+                    ForEach(-3...3, id: \.self) { offset in
+                        let distance = Double(offset) - fraction
+                        Text(String(format: "%02d", TimeWheelMath.wrap(base + offset, count: count)))
+                            .font(.system(size: 28, weight: .medium, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .frame(width: 40, height: rowHeight)
+                            .opacity(TimeWheelMath.opacity(distance: distance))
+                            // Цилиндр без perspective-3D: высота строки ~ cos(наклона). rotation3DEffect
+                            // с perspective ломает раскладку в offscreen-рендере (строки слипаются).
+                            .scaleEffect(y: CGFloat(cos(TimeWheelMath.tilt(distance: distance) * .pi / 180)))
+                    }
                 }
+                .offset(y: CGFloat(-fraction) * rowHeight)
                 WheelInputView(
                     rowHeight: rowHeight,
                     onMove: { move(by: $0) },
@@ -293,12 +309,15 @@ private struct TimeWheelColumn: View {
                 )
             }
             .frame(width: 40, height: rowHeight * 5)
+            .clipped()
             Text(unit)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.white.opacity(0.7))
                 .frame(width: 26, alignment: .leading)
         }
         .frame(width: 80)
+        .frame(height: rowHeight * 5)
+        .clipped()
         .onChange(of: value) { newValue in
             let current = TimeWheelMath.value(position: position, count: count)
             guard current != newValue else { return }

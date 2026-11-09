@@ -27,6 +27,25 @@ struct SettingsView: View {
     }
 }
 
+/// Строка-заголовок раскрывающегося блока. Кнопка на всю строку: DisclosureGroup внутри Form на macOS не реагирует на клики по заголовку.
+private func disclosureRow(_ title: String, isExpanded: Binding<Bool>) -> some View {
+    Button {
+        isExpanded.wrappedValue.toggle()
+    } label: {
+        HStack {
+            Text(title)
+            Spacer()
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .rotationEffect(.degrees(isExpanded.wrappedValue ? 90 : 0))
+        }
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .animation(.easeOut(duration: 0.15), value: isExpanded.wrappedValue)
+}
+
 // MARK: - Общие
 
 private struct GeneralSettingsTab: View {
@@ -34,6 +53,7 @@ private struct GeneralSettingsTab: View {
     @AppStorage("hoverEnabled") private var hoverEnabled = true
     @AppStorage("shortcut") private var shortcut = 0
     @AppStorage("thoughtShortcut") private var thoughtShortcut = 0
+    @AppStorage(IslandSettings.hoverMusicActionKey) private var musicHoverRaw = MusicHoverAction.openBuffer.rawValue
     @AppStorage("hoverOpenDelay") private var openDelay = 0.0
     @AppStorage("hoverCloseDelay") private var closeDelay = 0.30
     @StateObject private var state = GeneralTabState()
@@ -80,9 +100,14 @@ private struct GeneralSettingsTab: View {
                     .labelsHidden()
                     .frame(width: 250)
                 }
-                DisclosureGroup("Свои значения", isExpanded: $state.showCustomDelays) {
+                disclosureRow("Свои значения", isExpanded: $state.showCustomDelays)
+                if state.showCustomDelays {
                     delayStepper("Задержка открытия", value: $openDelay, range: 0...0.8)
                     delayStepper("Задержка закрытия", value: $closeDelay, range: 0...1.5)
+                }
+                Picker("При наведении во время музыки", selection: musicHoverAction) {
+                    Text("Открывать буфер").tag(MusicHoverAction.openBuffer)
+                    Text("Открывать мини-плеер").tag(MusicHoverAction.openMiniPlayer)
                 }
             } header: {
                 Text("Открытие")
@@ -106,6 +131,10 @@ private struct GeneralSettingsTab: View {
         } message: {
             Text("Параметры вернутся к значениям по умолчанию. История буфера и статистика фокуса не изменятся.")
         }
+    }
+
+    private var musicHoverAction: Binding<MusicHoverAction> {
+        Binding(get: { MusicHoverAction(rawValue: musicHoverRaw) ?? .openBuffer }, set: { musicHoverRaw = $0.rawValue })
     }
 
     private var sensitivityBinding: Binding<HoverSensitivity?> {
@@ -158,6 +187,21 @@ private struct GeneralSettingsTab: View {
 
 // MARK: - Панель
 
+/// Пресеты акцентного цвета (системные цвета macOS).
+struct AccentPreset: Identifiable {
+    let name: String
+    let hex: String
+    var id: String { hex }
+
+    static let all: [AccentPreset] = [
+        AccentPreset(name: "Оранжевый", hex: "#FF9F0A"),
+        AccentPreset(name: "Синий", hex: "#0A84FF"),
+        AccentPreset(name: "Зелёный", hex: "#30D158"),
+        AccentPreset(name: "Розовый", hex: "#FF375F"),
+        AccentPreset(name: "Фиолетовый", hex: "#BF5AF2"),
+    ]
+}
+
 private struct PanelSettingsTab: View {
     @ObservedObject var delegate: AppDelegate
     @AppStorage("panelWidth") private var panelWidth = 620.0
@@ -169,6 +213,9 @@ private struct PanelSettingsTab: View {
     @AppStorage("liveActivityMusic") private var liveMusic = true
     @AppStorage("shelfRetentionDays") private var shelfDays = 7
     @StateObject private var state = PanelTabState()
+    @AppStorage(AppearanceSettings.accentKey) private var accentHex = AppearanceSettings.accentDefaultHex
+    @AppStorage(AppearanceSettings.musicColorKey) private var musicMode = AppearanceSettings.musicColorDefault
+    @AppStorage(AppearanceSettings.musicCustomKey) private var musicCustomHex = AppearanceSettings.accentDefaultHex
 
     var body: some View {
         Form {
@@ -183,12 +230,19 @@ private struct PanelSettingsTab: View {
                     .labelsHidden()
                     .frame(width: 250)
                 }
-                DisclosureGroup("Свой размер", isExpanded: $state.showCustomSize) {
-                    Stepper(value: widthBinding, in: PanelSizeRange.width, step: PanelSizeRange.step) {
-                        LabeledContent("Ширина") { Text("\(Int(panelWidth)) пт").monospacedDigit() }
+                disclosureRow("Свой размер", isExpanded: $state.showCustomSize)
+                if state.showCustomSize {
+                    LabeledContent("Ширина") {
+                        HStack(spacing: 8) {
+                            Text("\(Int(panelWidth)) пт").monospacedDigit()
+                            Stepper("Ширина", value: widthBinding, in: PanelSizeRange.width, step: PanelSizeRange.step).labelsHidden()
+                        }
                     }
-                    Stepper(value: heightBinding, in: PanelSizeRange.height, step: PanelSizeRange.step) {
-                        LabeledContent("Высота") { Text("\(Int(panelHeight)) пт").monospacedDigit() }
+                    LabeledContent("Высота") {
+                        HStack(spacing: 8) {
+                            Text("\(Int(panelHeight)) пт").monospacedDigit()
+                            Stepper("Высота", value: heightBinding, in: PanelSizeRange.height, step: PanelSizeRange.step).labelsHidden()
+                        }
                     }
                 }
             } header: {
@@ -221,6 +275,44 @@ private struct PanelSettingsTab: View {
             }
 
             Section {
+                LabeledContent("Акцентный цвет") {
+                    HStack(spacing: 8) {
+                        ForEach(AccentPreset.all) { preset in
+                            Button { accentHex = preset.hex } label: {
+                                Circle()
+                                    .fill(Color(hex: preset.hex))
+                                    .frame(width: 18, height: 18)
+                                    .overlay(Circle().strokeBorder(Color.primary.opacity(isSelectedAccent(preset.hex) ? 0.8 : 0), lineWidth: 2).padding(-3))
+                            }
+                            .buttonStyle(.plain)
+                            .help(preset.name)
+                        }
+                        ColorPicker("Свой", selection: hexBinding($accentHex), supportsOpacity: false)
+                    }
+                }
+                LabeledContent("Цвет музыки") {
+                    HStack(spacing: 8) {
+                        Picker("Цвет музыки", selection: $musicMode) {
+                            Text("Как обложка").tag(MusicColorMode.artwork.rawValue)
+                            Text("Акцентный").tag(MusicColorMode.accent.rawValue)
+                            Text("Свой").tag(MusicColorMode.custom.rawValue)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .frame(width: 260)
+                        if musicMode == MusicColorMode.custom.rawValue {
+                            ColorPicker("Свой цвет музыки", selection: hexBinding($musicCustomHex), supportsOpacity: false)
+                                .labelsHidden()
+                        }
+                    }
+                }
+            } header: {
+                Text("Оформление")
+            } footer: {
+                Text("Акцент задаёт кольцо и таймер фокуса, индикаторы живой активности. Цвет музыки задаёт эквалайзер и прогресс мини-плеера.")
+            }
+
+            Section {
                 Toggle("Таймер в чёлке", isOn: $liveFocus)
                 Toggle("Агенты в чёлке", isOn: $liveAgents)
                 Toggle("Музыка в чёлке", isOn: $liveMusic)
@@ -230,6 +322,20 @@ private struct PanelSettingsTab: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func isSelectedAccent(_ hex: String) -> Bool {
+        accentHex.caseInsensitiveCompare(hex) == .orderedSame
+    }
+
+    /// Связка ColorPicker с hex-строкой в UserDefaults.
+    private func hexBinding(_ hex: Binding<String>) -> Binding<Color> {
+        Binding(
+            get: { Color(hex: hex.wrappedValue) },
+            set: { color in
+                if let rgb = RGB8(nsColor: NSColor(color)) { hex.wrappedValue = rgb.hex }
+            }
+        )
     }
 
     private var presetBinding: Binding<PanelSizePreset?> {

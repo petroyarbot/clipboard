@@ -61,6 +61,10 @@ check(AgentHookStatus.codexInstalled(configText: "notify = [\"/x/codex-notify-wr
 check(!AgentHookStatus.codexInstalled(configText: "model = \"o3\""), "codex without marker is not installed")
 check(!AgentHookStatus.codexInstalled(configText: nil), "missing codex config is not installed")
 
+// Сброс затрагивает новые настройки оформления и наведения на музыку.
+check(SettingsMapping.resettableKeys.contains("hoverMusicAction"), "reset clears hover music action")
+check(SettingsMapping.resettableKeys.contains("appearanceAccent") && SettingsMapping.resettableKeys.contains("appearanceMusicColor"), "reset clears appearance keys")
+check(!SettingsMapping.resettableKeys.contains("panelTab"), "reset keeps the panel tab")
 if failures > 0 {
     print("\(failures) check(s) failed")
     exit(1)

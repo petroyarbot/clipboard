@@ -8,7 +8,8 @@ struct LiveIslandView: View {
     var onTap: () -> Void
     var onStartNext: () -> Void
 
-    private static let accent = Color.orange
+    @AppStorage(AppearanceSettings.accentKey) private var accentHex = AppearanceSettings.accentDefaultHex
+    private var accent: Color { Color(hex: accentHex) }
     private static let claude = Color(red: 0.851, green: 0.467, blue: 0.341)
 
     var body: some View {
@@ -43,18 +44,18 @@ struct LiveIslandView: View {
     // MARK: - Что показываем
 
     private var isCompact: Bool {
-        model.presentation == .compactTimer || model.presentation == .compactAgent || model.presentation == .compactBoth || model.presentation == .compactMusic
+        model.presentation == .compactTimer || model.presentation == .compactAgent || model.presentation == .compactBoth || model.presentation == .compactMusic || model.presentation == .compactFocusMusic || model.presentation == .compactAgentMusic
     }
 
     /// "4:44" до часа, "1:02:05" от часа (форматирует `FocusTimer.compactText`).
     private var clock: String { timer.compactText }
 
     private var showsTimer: Bool {
-        model.presentation == .compactTimer || model.presentation == .compactBoth
+        model.presentation == .compactTimer || model.presentation == .compactBoth || model.presentation == .compactFocusMusic
     }
 
     private var showsAgent: Bool {
-        (model.presentation == .compactAgent || model.presentation == .compactBoth) && model.agent != nil
+        (model.presentation == .compactAgent || model.presentation == .compactBoth || model.presentation == .compactAgentMusic) && model.agent != nil
     }
 
     // MARK: - Компакт: слева и справа от выреза
@@ -79,7 +80,7 @@ struct LiveIslandView: View {
         } else if showsTimer {
             HStack(spacing: 5) {
                 ring(size: 15, line: 2.2)
-                if showsAgent {
+                if showsAgent || model.presentation == .compactFocusMusic {
                     timeText(size: 11)
                 } else {
                     Text(timer.phase == .focus ? "Фокус" : "Перерыв")
@@ -91,24 +92,29 @@ struct LiveIslandView: View {
         } else if showsAgent, let agent = model.agent {
             HStack(spacing: 5) {
                 badge(agent.source)
-                Text(agent.project)
+                if model.presentation == .compactAgentMusic { PulseDot(color: accent) } else { Text(agent.project)
                     .font(.system(size: 10, weight: .medium))
                     .lineLimit(1)
-                    .truncationMode(.tail)
+                    .truncationMode(.tail) }
             }
         }
     }
 
     @ViewBuilder private var rightWing: some View {
-        if model.presentation == .compactMusic {
+        if model.presentation == .compactFocusMusic {
+            HStack(spacing: 5) {
+                NowPlayingArtwork(image: music.artwork, size: 16, radius: 4)
+                NowPlayingCompactTrailing(monitor: music)
+            }
+        } else if model.presentation == .compactMusic || model.presentation == .compactAgentMusic {
             NowPlayingCompactTrailing(monitor: music)
         } else if showsAgent, let agent = model.agent {
             HStack(spacing: 4) {
                 if showsTimer { badge(agent.source) }
-                PulseDot()
+                PulseDot(color: accent)
                 Text(showsTimer ? "\(agent.count)" : "ждёт")
                     .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Self.accent)
+                    .foregroundStyle(accent)
             }
         } else if showsTimer {
             timeText(size: 13)
@@ -121,14 +127,14 @@ struct LiveIslandView: View {
             if paused {
                 Image(systemName: "pause.fill")
                     .font(.system(size: size * 0.5))
-                    .foregroundStyle(Self.accent.opacity(0.7))
+                    .foregroundStyle(accent.opacity(0.7))
             }
             Text(clock)
                 .font(.system(size: size, weight: .semibold))
                 .monospacedDigit()
                 .lineLimit(1)
                 .fixedSize()
-                .foregroundStyle(Self.accent.opacity(paused ? 0.5 : 1))
+                .foregroundStyle(accent.opacity(paused ? 0.5 : 1))
         }
     }
 
@@ -138,7 +144,7 @@ struct LiveIslandView: View {
                 .stroke(Color.white.opacity(0.18), lineWidth: line)
             Circle()
                 .trim(from: 0, to: CGFloat(timer.progress))
-                .stroke(Self.accent, style: StrokeStyle(lineWidth: line, lineCap: .round))
+                .stroke(accent, style: StrokeStyle(lineWidth: line, lineCap: .round))
                 .rotationEffect(.degrees(-90))
         }
         .frame(width: size, height: size)
@@ -173,7 +179,7 @@ struct LiveIslandView: View {
             HStack(spacing: 10) {
                 controlButton("+5") { timer.addTime(5 * 60) }
                 controlButton(symbol: timer.state == .running ? "pause.fill" : "play.fill",
-                              fill: timer.state == .running ? Self.accent.opacity(0.9) : Color.green.opacity(0.9)) {
+                              fill: timer.state == .running ? accent.opacity(0.9) : Color.green.opacity(0.9)) {
                     timer.toggle()
                 }
                 controlButton(symbol: "forward.end.fill") { timer.skip() }
@@ -246,11 +252,12 @@ struct LiveIslandView: View {
 
 /// Точка, которая мигает раз в секунду. Таймер-лента тикает только пока точка на экране.
 private struct PulseDot: View {
+    let color: Color
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
             let lit = Int(context.date.timeIntervalSinceReferenceDate) % 2 == 0
             Circle()
-                .fill(Color.orange)
+                .fill(color)
                 .frame(width: 6, height: 6)
                 .opacity(lit ? 1 : 0.25)
         }

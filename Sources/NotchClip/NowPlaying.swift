@@ -160,7 +160,7 @@ enum NowPlayingSettings {
     }
 }
 
-// MARK: - Цвет обложки
+// MARK: - Цвета: обложка, акцент, настройки оформления
 
 struct RGB8: Equatable {
     var r: UInt8
@@ -170,6 +170,44 @@ struct RGB8: Equatable {
     var nsColor: NSColor {
         NSColor(red: CGFloat(r) / 255, green: CGFloat(g) / 255, blue: CGFloat(b) / 255, alpha: 1)
     }
+}
+
+extension RGB8 {
+    /// Акцент по умолчанию (#FF9F0A) и запасной цвет при испорченной настройке.
+    static let accentDefault = RGB8(r: 255, g: 159, b: 10)
+
+    /// Разбор "#RRGGBB" (решётка необязательна). Некорректная строка даёт nil.
+    init?(hex: String) {
+        var text = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasPrefix("#") { text.removeFirst() }
+        guard text.count == 6, let value = UInt32(text, radix: 16) else { return nil }
+        self.init(r: UInt8((value >> 16) & 0xFF), g: UInt8((value >> 8) & 0xFF), b: UInt8(value & 0xFF))
+    }
+
+    /// Из цвета системы в sRGB (для ColorPicker). Цвета без пространства sRGB дают nil.
+    init?(nsColor: NSColor) {
+        guard let rgb = nsColor.usingColorSpace(.sRGB) else { return nil }
+        func channel(_ value: CGFloat) -> UInt8 { UInt8(min(255, max(0, (value * 255).rounded()))) }
+        self.init(r: channel(rgb.redComponent), g: channel(rgb.greenComponent), b: channel(rgb.blueComponent))
+    }
+
+    var hex: String { String(format: "#%02X%02X%02X", r, g, b) }
+}
+
+/// Режим цвета музыки: эквалайзер и прогресс мини-плеера.
+enum MusicColorMode: String, CaseIterable {
+    case artwork
+    case accent
+    case custom
+}
+
+/// Ключи настроек оформления (UserDefaults). UI в SettingsView, потребители читают те же ключи.
+enum AppearanceSettings {
+    static let accentKey = "appearanceAccent"
+    static let musicColorKey = "appearanceMusicColor"
+    static let musicCustomKey = "appearanceMusicCustomColor"
+    static let accentDefaultHex = RGB8.accentDefault.hex
+    static let musicColorDefault = MusicColorMode.accent.rawValue
 }
 
 enum DominantColor {

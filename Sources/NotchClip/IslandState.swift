@@ -7,6 +7,8 @@ enum IslandPresentation: Equatable {
     case compactTimer
     case compactAgent
     case compactBoth
+    case compactFocusMusic
+    case compactAgentMusic
     case miniPlayer
     case compactMusic
     case musicPlayer
@@ -24,6 +26,8 @@ struct IslandInputs: Equatable {
     var agentsEnabled = true
     var musicEnabled = true
     var musicPlaying = false
+    /// Что делает наведение во время музыки (без таймера): буфер или мини-плеер.
+    var musicHover: MusicHoverAction = .openBuffer
 }
 
 /// Баннер окончания фазы.
@@ -51,6 +55,7 @@ struct IslandLayout: Equatable {
 struct CompactWings: Equatable {
     var showsTimer = false
     var showsAgent = false
+    var showsMusic = false
     /// Текущее время ("4:44", "1:05:00"). Из строки берётся формат, а не сами цифры.
     var clock = "0:00"
     var phaseLabel = "Фокус"
@@ -62,10 +67,21 @@ struct CompactWings: Equatable {
 enum IslandSettings {
     static let focusKey = "liveActivityFocus"
     static let agentsKey = "liveActivityAgents"
+    static let hoverMusicActionKey = "hoverMusicAction"
+
+    static func musicHoverAction(defaults: UserDefaults) -> MusicHoverAction {
+        MusicHoverAction(rawValue: defaults.string(forKey: hoverMusicActionKey) ?? "") ?? .openBuffer
+    }
 
     static func isEnabled(_ key: String, defaults: UserDefaults) -> Bool {
         defaults.object(forKey: key) as? Bool ?? true
     }
+}
+
+/// Наведение на островок во время музыки: открыть буфер (по умолчанию) или мини-плеер.
+enum MusicHoverAction: String, CaseIterable {
+    case openBuffer = "buffer"
+    case openMiniPlayer = "miniPlayer"
 }
 
 /// Чистый редьюсер островка: без AppKit и без таймеров. Время передаётся числом (секунды).
@@ -146,11 +162,18 @@ struct IslandState: Equatable {
             let age = now - banner.startedAt
             if age >= 0 && age < Self.bannerDuration { return .banner }
         }
-        let agent = inputs.agentsEnabled && inputs.needsActionCount > 0
-        if agent { return .compactAgent }
         if let toast, now >= toast.startedAt, now < toast.startedAt + 2.5 { return .toast }
-        if inputs.focusEnabled && inputs.timer != .idle { return inputs.hovering ? .miniPlayer : .compactTimer }
-        if inputs.musicEnabled && inputs.musicPlaying { return inputs.hovering ? .musicPlayer : .compactMusic }
+        let agent = inputs.agentsEnabled && inputs.needsActionCount > 0
+        let focus = inputs.focusEnabled && inputs.timer != .idle
+        let music = inputs.musicEnabled && inputs.musicPlaying
+        if inputs.hovering && focus { return .miniPlayer }
+        if inputs.hovering && music && !focus && inputs.musicHover == .openMiniPlayer { return .musicPlayer }
+        if agent && focus { return .compactBoth }
+        if focus && music { return .compactFocusMusic }
+        if agent && music { return .compactAgentMusic }
+        if agent { return .compactAgent }
+        if focus { return .compactTimer }
+        if music { return .compactMusic }
         return .idle
     }
 
@@ -158,7 +181,7 @@ struct IslandState: Equatable {
         switch presentation {
         case .idle:
             return nil
-        case .compactTimer, .compactAgent, .compactBoth, .compactMusic:
+        case .compactTimer, .compactAgent, .compactBoth, .compactFocusMusic, .compactAgentMusic, .compactMusic:
             let wing = compactWingWidth(wings)
             return IslandLayout(width: notchWidth + 2 * wing, height: notchHeight, bottomRadius: 12, contentTop: 0, wing: wing)
         case .miniPlayer, .musicPlayer:
@@ -196,14 +219,18 @@ struct IslandState: Equatable {
         // Слева: кольцо 15 + 5 + (время при агенте 11 pt | подпись фазы 10 pt) или значок агента 22 + 5 + проект (до 96).
         var left: CGFloat = 0
         if wings.showsTimer {
-            let tail = wings.showsAgent ? clockWidth(wings.clock, size: 11) : textWidth(wings.phaseLabel, size: 10, weight: .semibold)
+            let tail = (wings.showsAgent || wings.showsMusic) ? clockWidth(wings.clock, size: 11) : textWidth(wings.phaseLabel, size: 10, weight: .semibold)
             left = 15 + 5 + tail
+        } else if wings.showsAgent && wings.showsMusic {
+            left = badgeWidth + 5 + 6
         } else if wings.showsAgent {
             left = badgeWidth + 5 + min(textWidth(wings.agentProject, size: 10, weight: .medium), 96)
         }
         // Справа: значок агента + точка 6 + 4 + число/"ждёт" (10 pt), либо одно время 13 pt.
         var right: CGFloat = 0
-        if wings.showsAgent {
+        if wings.showsMusic {
+            right = wings.showsTimer ? 16 + 5 + 14 : 14
+        } else if wings.showsAgent {
             let count = wings.showsTimer ? "\(wings.agentCount)" : "ждёт"
             right = (wings.showsTimer ? badgeWidth + 4 : 0) + 6 + 4 + textWidth("\(count)", size: 10, weight: .semibold)
         } else if wings.showsTimer {
